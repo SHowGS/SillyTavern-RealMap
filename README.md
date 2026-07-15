@@ -1,4 +1,4 @@
-# SillyTavern-MapService
+# SillyTavern-RealMap
 
 A [SillyTavern](https://github.com/SillyTavern/SillyTavern) third-party extension that integrates the **高德地图 (Amap) JS API 2.0** to enrich roleplay with real-world geographic context — places, weather, routing, and an interactive map.
 
@@ -20,7 +20,7 @@ A [SillyTavern](https://github.com/SillyTavern/SillyTavern) third-party extensio
 1. Open SillyTavern → **Extensions** → **Install extension**.
 2. Enter the repository URL:
    ```
-   https://github.com/SHowGS/SillyTavern-MapService
+   https://github.com/SHowGS/SillyTavern-RealMap
    ```
 3. Reload the page and enable **现实地图**.
 
@@ -30,7 +30,7 @@ Clone this repository into your SillyTavern's `public/scripts/extensions/third-p
 
 ```bash
 cd public/scripts/extensions/third-party
-git clone https://github.com/SHowGS/SillyTavern-MapService.git
+git clone https://github.com/SHowGS/SillyTavern-RealMap.git
 ```
 
 Then reload SillyTavern.

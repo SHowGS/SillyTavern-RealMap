@@ -140,7 +140,7 @@ function bindSettings() {
 }
 
 export async function init() {
-    const settingsHtml = await renderExtensionTemplateAsync('third-party/SillyTavern-MapService', 'settings');
+    const settingsHtml = await renderExtensionTemplateAsync('third-party/SillyTavern-RealMap', 'settings');
     $('#extensions_settings').append(settingsHtml);
     bindSettings();
     console.debug('[MapService] initialized');

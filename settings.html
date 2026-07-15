@@ -37,8 +37,15 @@
             <label for="realmap_llm_api_key">API Key</label>
             <input id="realmap_llm_api_key" class="text_pole" type="password" autocomplete="off" placeholder="sk-..." />
 
-            <label for="realmap_llm_model">模型</label>
-            <input id="realmap_llm_model" class="text_pole" type="text" autocomplete="off" placeholder="gpt-4o-mini" />
+            <div class="flex-container justifySpaceBetween">
+                <label for="realmap_llm_model" class="flex1">模型</label>
+                <div id="realmap_llm_refresh_models" class="right_menu_button margin0 padding0" title="获取模型列表" data-i18n="[title]获取模型列表">
+                    <i class="fa-solid fa-sync"></i>
+                </div>
+            </div>
+            <select id="realmap_llm_model" class="text_pole">
+                <option value="">（点击右侧按钮获取）</option>
+            </select>
 
             <hr>
             <small class="opacity70p">框架版本 —— 地图交互界面与指令将在后续版本中实现。</small>

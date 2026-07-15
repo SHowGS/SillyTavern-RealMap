@@ -75,6 +75,67 @@ async function loadAmap() {
     return amapPromise;
 }
 
+const LLM_BASE_URLS = {
+    openai: 'https://api.openai.com/v1',
+    openrouter: 'https://openrouter.ai/api/v1',
+    deepseek: 'https://api.deepseek.com/v1',
+    custom: '',
+};
+
+function getLlmBaseUrl(s) {
+    return s.llmSource === 'custom' ? (s.llmCustomUrl || '').trim().replace(/\/$/, '') : LLM_BASE_URLS[s.llmSource] || '';
+}
+
+async function refreshLlmModels() {
+    const s = ensureSettings();
+    const baseUrl = getLlmBaseUrl(s);
+    const dropdown = document.getElementById('realmap_llm_model');
+    if (!(dropdown instanceof HTMLSelectElement)) return;
+    if (!baseUrl) {
+        toastr.warning(t`请先填写 Base URL（或选择非自定义的 API 类型）。`);
+        return;
+    }
+    if (!s.llmApiKey) {
+        toastr.warning(t`请先填写 API Key。`);
+        return;
+    }
+    try {
+        const resp = await fetch(`${baseUrl}/models`, {
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${s.llmApiKey}` },
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        const models = Array.isArray(data?.data) ? data.data.map(m => m.id).filter(Boolean) : [];
+        // 保留当前选中值
+        const prev = s.llmModel;
+        dropdown.innerHTML = '';
+        models.forEach(id => {
+            const opt = document.createElement('option');
+            opt.value = id;
+            opt.textContent = id;
+            dropdown.add(opt);
+        });
+        if (models.length === 0) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = '（无可用模型）';
+            dropdown.add(opt);
+        }
+        if (prev && models.includes(prev)) {
+            dropdown.value = prev;
+            s.llmModel = prev;
+        } else {
+            s.llmModel = String(dropdown.value);
+        }
+        saveSettingsDebounced();
+        toastr.success(t`已获取 ${models.length} 个模型。`);
+    } catch (e) {
+        console.error('[realmap] refresh models failed', e);
+        toastr.error(t`获取模型失败（可能是 CORS 或 Key/URL 问题）：${e.message}`);
+    }
+}
+
 async function testConnection() {
     try {
         const AMap = await loadAmap();
@@ -123,10 +184,15 @@ function bindSettings() {
         s.llmApiKey = String($(this).val());
         saveSettingsDebounced();
     });
-    $('#realmap_llm_model').val(s.llmModel).on('input', function () {
+    const modelDropdown = $('#realmap_llm_model');
+    if (s.llmModel && !modelDropdown.find(`option[value="${s.llmModel}"]`).length) {
+        modelDropdown.append(`<option value="${s.llmModel}">${s.llmModel}</option>`);
+    }
+    modelDropdown.val(s.llmModel).on('change', function () {
         s.llmModel = String($(this).val());
         saveSettingsDebounced();
     });
+    $('#realmap_llm_refresh_models').on('click', () => void refreshLlmModels());
     toggleLlmCustomUrl();
 }
 

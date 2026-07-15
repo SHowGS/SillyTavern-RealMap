@@ -1,6 +1,9 @@
-import { extension_settings, renderExtensionTemplateAsync } from '../../../extensions.js';
-import { saveSettingsDebounced } from '../../../../script.js';
+import { extension_settings, renderExtensionTemplateAsync, getContext } from '../../../extensions.js';
+import { saveSettingsDebounced, eventSource, event_types, chat_metadata } from '../../../../script.js';
 import { t } from '../../../i18n.js';
+import { Popup, POPUP_RESULT } from '../../../popup.js';
+import { setExtensionEnabledForChat, isExtensionEnabledForChat, findLastAiMessage, getVisibleMessages, clearAllChatLocations, setChatState, getChatState } from './state.js';
+import { initMinimap, showMinimap, hideMinimap, refreshMap } from './minimap.js';
 
 const MODULE_NAME = 'realmap';
 const LOADER_URL = 'https://webapi.amap.com/loader.js';
@@ -284,5 +287,166 @@ export async function init() {
     const settingsHtml = await renderExtensionTemplateAsync('third-party/SillyTavern-RealMap', 'settings');
     $('#extensions_settings').append(settingsHtml);
     bindSettings();
+    injectMinimapHtml();
+    await initMinimap({ onDisableClick: handleDisableClick });
+    eventSource.on(event_types.CHAT_CHANGED, () => void onChatChanged());
+    eventSource.on(event_types.MESSAGE_DELETED, () => void onChatChanged());
+    eventSource.on(event_types.MESSAGE_EDITED, () => void onChatChanged());
+    eventSource.makeLast(event_types.CHARACTER_MESSAGE_RENDERED, (messageId) => void onAiMessage(messageId));
+    onChatChanged();
+    $('#realmap_enable_btn').on('click', () => void handleEnableFromSettings());
     console.debug('[realmap] initialized');
+}
+
+function injectMinimapHtml() {
+    if (!$('#realmap_minimap').length) {
+        const html = `
+<div id="realmap_minimap" class="draggable" style="display:none;">
+    <div class="panelControlBar flex-container">
+        <div id="realmap_minimapheader" class="fa-solid fa-grip drag-grabber"></div>
+        <div id="realmap_minimap_close" class="fa-solid fa-circle-xmark dragClose"></div>
+    </div>
+    <div class="realmap_topbar">
+        <div id="realmap_disable_btn" class="realmap_link_btn">禁用</div>
+    </div>
+    <div id="realmap_map_container">
+        <div class="realmap_zoom_ctl">
+            <div id="realmap_zoom_in" class="realmap_zoom_btn">+</div>
+            <div id="realmap_zoom_out" class="realmap_zoom_btn">−</div>
+        </div>
+        <div id="realmap_clean_state_hint" class="realmap_hint">请开始游玩</div>
+    </div>
+</div>`;
+        $('#movingDivs').append(html);
+    }
+}
+
+function isChatOpen() {
+    const ctx = getContext();
+    return (ctx.characterId !== undefined) || Boolean(ctx.groupId);
+}
+
+async function onChatChanged() {
+    refreshEnableButton();
+    if (!isChatOpen()) {
+        hideMinimap();
+        return;
+    }
+    const enabled = isExtensionEnabledForChat();
+    if (enabled) {
+        await refreshMap();
+        showMinimap();
+        return;
+    }
+    const last = findLastAiMessage();
+    if (last?.message?.extra?.realmap) {
+        setExtensionEnabledForChat(true);
+        setChatState(last.message.extra.realmap);
+        await refreshMap();
+        showMinimap();
+        return;
+    }
+    if (last) {
+        const ok = await askEnable('是否在本聊天启用现实地图？');
+        if (!ok) {
+            setExtensionEnabledForChat(false);
+            hideMinimap();
+            return;
+        }
+        setExtensionEnabledForChat(true);
+        const loc = await inferLocationFromVisible();
+        if (!loc) {
+            window.toastr?.warning('无法判断具体位置，请手动设置。');
+        }
+        await refreshMap();
+        showMinimap();
+    } else {
+        const ok = await askEnable('是否启用现实地图？');
+        if (!ok) {
+            setExtensionEnabledForChat(false);
+            hideMinimap();
+            return;
+        }
+        setExtensionEnabledForChat(true);
+        setChatState(null);
+        await refreshMap();
+        showMinimap();
+    }
+}
+
+async function onAiMessage(_messageId) {
+    if (!isChatOpen() || !isExtensionEnabledForChat()) return;
+    const loc = await inferLocationFromVisible();
+    await refreshMap();
+    void loc;
+}
+
+function refreshEnableButton() {
+    const $btn = $('#realmap_enable_block');
+    if (!isChatOpen()) {
+        $btn.hide();
+        return;
+    }
+    $btn.show();
+    const enabled = isExtensionEnabledForChat();
+    $('#realmap_enable_btn').toggleClass('disabled', enabled).css('opacity', enabled ? 0.5 : 1).prop('disabled', enabled);
+    $('#realmap_enable_btn').text(enabled ? '现实地图已启用' : '启用现实地图');
+}
+
+async function handleEnableFromSettings() {
+    if (!isChatOpen()) return;
+    if (isExtensionEnabledForChat()) return;
+    setExtensionEnabledForChat(true);
+    const last = findLastAiMessage();
+    if (last) {
+        const loc = await inferLocationFromVisible();
+        if (!loc) window.toastr?.warning('无法判断具体位置，请手动设置。');
+    }
+    await refreshMap();
+    showMinimap();
+    refreshEnableButton();
+}
+
+async function handleDisableClick() {
+    const clearId = 'realmap_clear_history';
+    const result = await Popup.show.confirm(
+        '禁用现实地图？',
+        '是否在本聊天禁用现实地图？（您可以在拓展页再次启用）',
+        {
+            customInputs: [{
+                type: 'checkbox',
+                label: '同时清除本聊天的历史地图数据（不会对正文有任何影响）',
+                id: clearId,
+                defaultState: false,
+            }],
+            onClose: async (popup) => {
+                if (popup.result !== POPUP_RESULT.AFFIRMATIVE) return;
+                const alsoClear = Boolean(popup.inputResults.get(clearId));
+                setExtensionEnabledForChat(false, { immediate: true });
+                if (alsoClear) {
+                    clearAllChatLocations();
+                }
+                hideMinimap();
+                refreshEnableButton();
+            },
+        },
+    );
+    void result;
+}
+
+async function askEnable(text) {
+    const r = await Popup.show.confirm('现实地图', text);
+    return r === POPUP_RESULT.AFFIRMATIVE;
+}
+
+async function inferLocationFromVisible() {
+    // P1 stub: 暂不接入插件 LLM。读取上一条 AI 消息的 extra.realmap 若存在则沿用，否则返回 null。
+    const last = findLastAiMessage();
+    if (!last) return null;
+    const loc = last.message?.extra?.realmap;
+    if (loc && (loc.lng !== undefined || (loc.mode === 'idle' && loc.lat !== undefined))) {
+        setChatState(loc);
+        return loc;
+    }
+    return null;
 }

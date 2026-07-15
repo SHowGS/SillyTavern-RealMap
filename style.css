@@ -4,10 +4,7 @@
     gap: 8px;
 }
 
-#realmap_test_connection {
-    white-space: nowrap;
-}
-
+#realmap_test_connection,
 #realmap_llm_refresh_models {
     white-space: nowrap;
 }
@@ -25,4 +22,192 @@
 .realmap_tab.active {
     filter: brightness(1.2);
     border-color: var(--SmartThemeQuoteColor);
+}
+
+/* ===== 小窗 ===== */
+#realmap_minimap {
+    position: fixed;
+    z-index: 2000;
+    background: var(--SmartThemeBlurTintColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-width: 180px;
+    min-height: 120px;
+}
+
+#realmap_minimap .panelControlBar {
+    justify-content: space-between;
+    padding: 2px 4px;
+    cursor: move;
+}
+
+#realmap_minimap_close {
+    cursor: pointer;
+}
+
+.realmap_topbar {
+    display: flex;
+    justify-content: flex-end;
+    padding: 0 4px;
+}
+
+.realmap_link_btn {
+    font-size: 12px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.realmap_link_btn:hover {
+    background: rgba(255, 0, 0, 0.15);
+    color: #ff4444 !important;
+}
+
+#realmap_map_container {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    width: 100%;
+    background: #888;
+}
+
+#realmap_clean_state_hint {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-size: 14px;
+    text-shadow: 0 1px 2px #000;
+    pointer-events: none;
+}
+
+.realmap_zoom_ctl {
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    z-index: 5;
+}
+
+.realmap_zoom_btn {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.85);
+    color: #000;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 16px;
+    user-select: none;
+}
+
+.realmap_zoom_btn:hover {
+    background: #fff;
+}
+
+/* ===== 全屏 ===== */
+.realmap_fullscreen {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-height: 70vh;
+    background: #888;
+}
+
+#realmap_map_fullscreen {
+    position: absolute;
+    inset: 0;
+}
+
+#realmap_fs_zoom_in,
+#realmap_fs_zoom_out {
+    width: 32px;
+    height: 32px;
+    border-radius: 4px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.realmap_fs_zoom_ctl {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    z-index: 100;
+}
+
+.realmap_search {
+    position: absolute;
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    width: min(420px, 80%);
+    z-index: 100;
+}
+
+#realmap_search_input {
+    width: 100%;
+    background: rgba(255, 255, 255, 0.95);
+    color: #000;
+    border-radius: 4px;
+}
+
+#realmap_search_results {
+    display: none;
+    flex-direction: column;
+    max-height: 320px;
+    overflow-y: auto;
+    background: rgba(255, 255, 255, 0.95);
+    color: #000;
+    border-radius: 4px;
+    margin-bottom: 4px;
+}
+
+.realmap_search_item {
+    padding: 6px 8px;
+    cursor: pointer;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.realmap_search_item:hover {
+    background: rgba(0, 0, 0, 0.06);
+}
+
+.realmap_search_item .name {
+    font-size: 13px;
+    font-weight: bold;
+}
+
+.realmap_search_item .addr {
+    font-size: 11px;
+    opacity: 0.7;
+}
+
+.realmap_search_empty {
+    padding: 8px;
+    color: #888;
+    font-size: 12px;
+    text-align: center;
+}
+
+.realmap_menu_item {
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+.realmap_menu_item:hover {
+    background: rgba(255, 255, 255, 0.15);
 }

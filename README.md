@@ -22,7 +22,7 @@ A [SillyTavern](https://github.com/SillyTavern/SillyTavern) third-party extensio
    ```
    https://github.com/SHowGS/SillyTavern-MapService
    ```
-3. Reload the page and enable **Map Service (Amap)**.
+3. Reload the page and enable **现实地图**.
 
 ### Manual
 
@@ -38,7 +38,7 @@ Then reload SillyTavern.
 ## Configuration
 
 1. Apply for a **Web端 (JS API)** key and its **安全密钥 (securityJsCode)** at <https://console.amap.com/dev/key>.
-2. In SillyTavern, open **Extensions → Map Service (Amap)**.
+2. In SillyTavern, open **Extensions → 现实地图**.
 3. Paste your key and security code. Both are saved to your local SillyTavern settings only.
 4. Click **Test Connection** to verify.
 

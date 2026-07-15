@@ -9,41 +9,83 @@
 
             <hr>
 
-            <label for="realmap_key">高德 JS API Key</label>
-            <input id="realmap_key" class="text_pole" type="password" autocomplete="off" placeholder="Web端 (JS API) Key" />
-            <label for="realmap_security_code">安全密钥 (securityJsCode)</label>
-            <input id="realmap_security_code" class="text_pole" type="password" autocomplete="off" placeholder="securityJsCode" />
-
-            <div class="menu_button" id="realmap_test_connection">测试连接</div>
-
-            <hr>
-
-            <b>LLM API 配置</b>
-            <small>用于扩展自身的地点描述生成 / 解析调用（OpenAI 兼容接口）。</small>
-
-            <label for="realmap_llm_source">API 类型</label>
-            <select id="realmap_llm_source" class="text_pole">
-                <option value="openai">OpenAI</option>
-                <option value="openrouter">OpenRouter</option>
-                <option value="deepseek">DeepSeek</option>
-                <option value="custom">自定义 (OpenAI 兼容)</option>
-            </select>
-
-            <div id="realmap_llm_custom_url_block">
-                <label for="realmap_llm_custom_url">Base URL</label>
-                <input id="realmap_llm_custom_url" class="text_pole" type="text" autocomplete="off" placeholder="https://api.example.com/v1" />
+            <!-- Tab 导航 -->
+            <div class="realmap_tabs flex-container flexGap5">
+                <div class="menu_button realmap_tab" data-tab="api">API 配置</div>
+                <div class="menu_button realmap_tab" data-tab="prompt">提示词配置</div>
             </div>
 
-            <label for="realmap_llm_api_key">API Key</label>
-            <input id="realmap_llm_api_key" class="text_pole" type="password" autocomplete="off" placeholder="sk-..." />
+            <!-- API 配置面板 -->
+            <div class="realmap_tab_panel" data-panel="api">
+                <label for="realmap_key">高德 JS API Key</label>
+                <input id="realmap_key" class="text_pole" type="password" autocomplete="off" placeholder="Web端 (JS API) Key" />
+                <label for="realmap_security_code">安全密钥 (securityJsCode)</label>
+                <input id="realmap_security_code" class="text_pole" type="password" autocomplete="off" placeholder="securityJsCode" />
 
-            <div class="flex-container justifySpaceBetween">
-                <label for="realmap_llm_model" class="flex1">模型</label>
-                <div class="menu_button margin0 padding0" id="realmap_llm_refresh_models">获取模型</div>
+                <div class="menu_button" id="realmap_test_connection">测试连接</div>
+
+                <hr>
+
+                <b>LLM API 配置</b>
+                <small>用于扩展自身的地点描述生成 / 解析调用（OpenAI 兼容接口）。</small>
+
+                <label for="realmap_llm_source">API 类型</label>
+                <select id="realmap_llm_source" class="text_pole">
+                    <option value="openai">OpenAI</option>
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="deepseek">DeepSeek</option>
+                    <option value="custom">自定义 (OpenAI 兼容)</option>
+                </select>
+
+                <div id="realmap_llm_custom_url_block">
+                    <label for="realmap_llm_custom_url">Base URL</label>
+                    <input id="realmap_llm_custom_url" class="text_pole" type="text" autocomplete="off" placeholder="https://api.example.com/v1" />
+                </div>
+
+                <label for="realmap_llm_api_key">API Key</label>
+                <input id="realmap_llm_api_key" class="text_pole" type="password" autocomplete="off" placeholder="sk-..." />
+
+                <div class="flex-container justifySpaceBetween">
+                    <label for="realmap_llm_model" class="flex1">模型</label>
+                    <div class="menu_button margin0 padding0" id="realmap_llm_refresh_models">获取模型</div>
+                </div>
+                <select id="realmap_llm_model" class="text_pole">
+                    <option value="">（点击右侧按钮获取）</option>
+                </select>
             </div>
-            <select id="realmap_llm_model" class="text_pole">
-                <option value="">（点击右侧按钮获取）</option>
-            </select>
+
+            <!-- 提示词配置面板 -->
+            <div class="realmap_tab_panel" data-panel="prompt" style="display:none">
+                <small>编辑位置推断所用的提示词。留空即发送空；点击「恢复默认」可一次性回写所有默认。改动后立即保存。</small>
+
+                <hr>
+
+                <label for="realmap_prompt_system">系统提示词</label>
+                <small>位置推断的主系统提示词。定义 LLM 的角色与任务。</small>
+                <textarea id="realmap_prompt_system" class="text_pole" rows="6" placeholder="你是位置推断助手…"></textarea>
+
+                <label for="realmap_prompt_suffix">追加约束</label>
+                <small>拼在系统提示词之后的额外约束（如风格、语言、禁止行为）。</small>
+                <textarea id="realmap_prompt_suffix" class="text_pole" rows="4" placeholder="例如：一律使用中文地点名；不要解释…"></textarea>
+
+                <label for="realmap_prompt_json_schema">输出 JSON 格式</label>
+                <small>强制 LLM 输出的 JSON 动作结构说明。</small>
+                <textarea id="realmap_prompt_json_schema" class="text_pole" rows="6" placeholder="{ "action": "idle" | "moving" | "null", ... }"></textarea>
+
+                <label for="realmap_prompt_tool_spec">工具说明</label>
+                <small>启用工具调用模式时给 LLM 的工具描述（暂未启用，预留）。</small>
+                <textarea id="realmap_prompt_tool_spec" class="text_pole" rows="6" placeholder="（保留字段）"></textarea>
+
+                <label for="realmap_prompt_fallback">null 时话术</label>
+                <small>推断返回 null 时弹给用户的话术模板，支持 {reason} 占位。</small>
+                <input id="realmap_prompt_fallback" class="text_pole" placeholder="本轮位置推断失败：{reason}" />
+
+                <hr>
+
+                <div class="flex-container flexGap5">
+                    <div class="menu_button" id="realmap_prompt_reset">恢复默认</div>
+                </div>
+            </div>
 
             <hr>
             <small class="opacity70p">框架版本 —— 地图交互界面与指令将在后续版本中实现。</small>

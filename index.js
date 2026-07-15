@@ -13,7 +13,20 @@ const LOADER_URL = 'https://webapi.amap.com/loader.js';
  * @property {string} llmCustomUrl Custom OpenAI-compatible base URL
  * @property {string} llmApiKey LLM API key
  * @property {string} llmModel LLM model id
+ * @property {string} llmPromptSystem 系统提示词
+ * @property {string} llmPromptSuffix 追加约束
+ * @property {string} llmPromptJsonSchema 输出 JSON 格式说明
+ * @property {string} llmPromptToolSpec 工具说明（预留）
+ * @property {string} llmPromptFallback null 时用户话术模板
  */
+
+const DEFAULT_PROMPTS = {
+    system: '你是位置推断助手。你会读到一段角色扮演对话：包含上一轮用户/AI 正文、上一轮确定的位置（如有），以及本轮用户/AI 正文。你的任务是判断本轮结束时用户角色所处的地点，并以 JSON 输出。\n\n规则：\n- 仅依据正文描述判断，不脑补。\n- 上一轮位置仅作参考，不直接沿用，除非本轮正文明确表示原地未动。\n- 输出地点用中文具体名（如「望京 SOHO」「故宫太和殿」），避免行政泛指。\n- 无法确定时输出 {"action":"null","reason":"..."}。',
+    suffix: '一律使用中文地点名。不要解释。只输出 JSON。',
+    json_schema: '{ "action":"idle", "place":"望京SOHO", "poi":true }\n{ "action":"moving", "from":"...","to":"...","route_mode":"walking","duration_min":30 }\n{ "action":"null", "reason":"叙事未含足够地理信息" }',
+    tool_spec: '（保留字段，暂未启用工具调用模式）',
+    fallback: '本轮位置推断失败：{reason}。可在地图上手动确认或调用 /realmap.set 纠正。',
+};
 
 const DEFAULT_SETTINGS = {
     key: '',
@@ -22,13 +35,23 @@ const DEFAULT_SETTINGS = {
     llmCustomUrl: '',
     llmApiKey: '',
     llmModel: '',
+    llmPromptSystem: DEFAULT_PROMPTS.system,
+    llmPromptSuffix: DEFAULT_PROMPTS.suffix,
+    llmPromptJsonSchema: DEFAULT_PROMPTS.json_schema,
+    llmPromptToolSpec: DEFAULT_PROMPTS.tool_spec,
+    llmPromptFallback: DEFAULT_PROMPTS.fallback,
 };
 
 function ensureSettings() {
     if (!extension_settings[MODULE_NAME]) {
         extension_settings[MODULE_NAME] = {};
     }
-    extension_settings[MODULE_NAME] = Object.assign({}, DEFAULT_SETTINGS, extension_settings[MODULE_NAME]);
+    // 仅对缺失字段（undefined）填默认；已存在的空字符串视为用户主动清空，保留。
+    for (const k of Object.keys(DEFAULT_SETTINGS)) {
+        if (extension_settings[MODULE_NAME][k] === undefined) {
+            extension_settings[MODULE_NAME][k] = DEFAULT_SETTINGS[k];
+        }
+    }
     return extension_settings[MODULE_NAME];
 }
 
@@ -210,6 +233,47 @@ function bindSettings() {
     });
     $('#realmap_llm_refresh_models').on('click', () => void refreshLlmModels());
     toggleLlmCustomUrl();
+
+    // 提示词五段绑定
+    const promptFields = [
+        ['#realmap_prompt_system', 'llmPromptSystem'],
+        ['#realmap_prompt_suffix', 'llmPromptSuffix'],
+        ['#realmap_prompt_json_schema', 'llmPromptJsonSchema'],
+        ['#realmap_prompt_tool_spec', 'llmPromptToolSpec'],
+        ['#realmap_prompt_fallback', 'llmPromptFallback'],
+    ];
+    for (const [sel, key] of promptFields) {
+        $(sel).val(s[key] ?? '').on('input', function () {
+            s[key] = String($(this).val());
+            saveSettingsDebounced();
+        });
+    }
+
+    // 恢复默认按钮
+    $('#realmap_prompt_reset').on('click', () => {
+        s.llmPromptSystem = DEFAULT_PROMPTS.system;
+        s.llmPromptSuffix = DEFAULT_PROMPTS.suffix;
+        s.llmPromptJsonSchema = DEFAULT_PROMPTS.json_schema;
+        s.llmPromptToolSpec = DEFAULT_PROMPTS.tool_spec;
+        s.llmPromptFallback = DEFAULT_PROMPTS.fallback;
+        $('#realmap_prompt_system').val(DEFAULT_PROMPTS.system);
+        $('#realmap_prompt_suffix').val(DEFAULT_PROMPTS.suffix);
+        $('#realmap_prompt_json_schema').val(DEFAULT_PROMPTS.json_schema);
+        $('#realmap_prompt_tool_spec').val(DEFAULT_PROMPTS.tool_spec);
+        $('#realmap_prompt_fallback').val(DEFAULT_PROMPTS.fallback);
+        saveSettingsDebounced();
+        toastr.success(t`已恢复默认提示词。`);
+    });
+
+    // Tab 切换：每次重载默认显示 api
+    $('.realmap_tab').on('click', function () {
+        const tab = $(this).data('tab');
+        $('.realmap_tab').removeClass('active');
+        $(this).addClass('active');
+        $('.realmap_tab_panel').hide();
+        $(`.realmap_tab_panel[data-panel="${tab}"]`).show();
+    });
+    $('.realmap_tab[data-tab="api"]').trigger('click');
 }
 
 function toggleLlmCustomUrl() {

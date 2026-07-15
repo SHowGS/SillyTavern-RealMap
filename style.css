@@ -11,3 +11,18 @@
 #realmap_llm_refresh_models {
     white-space: nowrap;
 }
+
+.realmap_tabs {
+    margin-bottom: 4px;
+}
+
+.realmap_tab {
+    white-space: nowrap;
+    flex: 1;
+    text-align: center;
+}
+
+.realmap_tab.active {
+    filter: brightness(1.2);
+    border-color: var(--SmartThemeQuoteColor);
+}

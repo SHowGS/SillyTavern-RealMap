@@ -1,38 +1,36 @@
 <div class="mapservice_settings">
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-            <b data-i18n="Map Service (Amap)">Map Service (Amap)</b>
+            <b>地图服务</b>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
-            <small data-i18n="Integrates 高德地图 (Amap) JS API to enrich roleplay with location, weather, routing and POI context. Get your key and security code at https://console.amap.com/dev/key">
-                Integrates 高德地图 (Amap) JS API to enrich roleplay with location, weather, routing and POI context. Get your key and security code at https://console.amap.com/dev/key
-            </small>
+            <small>接入高德地图 JS API 2.0，为角色扮演注入真实地理位置、天气、路线与 POI 上下文。请在 https://console.amap.com/dev/key 申请 Key 与安全密钥。</small>
 
             <hr>
 
-            <label for="mapservice_key" data-i18n="Amap JS API Key">Amap JS API Key</label>
+            <label for="mapservice_key">高德 JS API Key</label>
             <input id="mapservice_key" class="text_pole" type="password" autocomplete="off" placeholder="Web端 (JS API) Key" />
-            <label for="mapservice_security_code" data-i18n="Amap Security Code (安全密钥)">Amap Security Code (安全密钥)</label>
+            <label for="mapservice_security_code">安全密钥 (securityJsCode)</label>
             <input id="mapservice_security_code" class="text_pole" type="password" autocomplete="off" placeholder="securityJsCode" />
 
             <div class="flex-container flexGap5">
                 <div class="flex1">
-                    <label for="mapservice_default_city" data-i18n="Default City">Default City</label>
+                    <label for="mapservice_default_city">默认城市</label>
                     <input id="mapservice_default_city" class="text_pole" type="text" placeholder="北京" />
                 </div>
                 <div class="flex1">
-                    <label for="mapservice_map_style" data-i18n="Map Style">Map Style</label>
+                    <label for="mapservice_map_style">地图样式</label>
                     <select id="mapservice_map_style" class="text_pole">
-                        <option value="amap://styles/normal" data-i18n="Normal">Normal</option>
-                        <option value="amap://styles/dark" data-i18n="Dark">Dark</option>
-                        <option value="amap://styles/light" data-i18n="Light">Light</option>
-                        <option value="amap://styles/whitesmoke" data-i18n="Whitesmoke">Whitesmoke</option>
-                        <option value="amap://styles/fresh" data-i18n="Fresh">Fresh</option>
-                        <option value="amap://styles/macaron" data-i18n="Macaron">Macaron</option>
-                        <option value="amap://styles/blue" data-i18n="Blue">Blue</option>
-                        <option value="amap://styles/darkblue" data-i18n="Dark Blue">Dark Blue</option>
-                        <option value="amap://styles/grey" data-i18n="Grey">Grey</option>
+                        <option value="amap://styles/normal">标准</option>
+                        <option value="amap://styles/dark">幻影黑</option>
+                        <option value="amap://styles/light">月光银</option>
+                        <option value="amap://styles/whitesmoke">远山黛</option>
+                        <option value="amap://styles/fresh">草色青</option>
+                        <option value="amap://styles/macaron">马卡龙</option>
+                        <option value="amap://styles/blue">靛青蓝</option>
+                        <option value="amap://styles/darkblue">极夜蓝</option>
+                        <option value="amap://styles/grey">雅士灰</option>
                     </select>
                 </div>
             </div>
@@ -40,19 +38,17 @@
             <div class="flex-container flexGap5">
                 <label class="checkbox_label" for="mapservice_inject_context">
                     <input id="mapservice_inject_context" type="checkbox" />
-                    <span data-i18n="Inject map context into prompt">Inject map context into prompt</span>
+                    <span>将地图上下文注入提示词</span>
                 </label>
             </div>
 
             <div class="flex-container flexGap5">
-                <div class="menu_button" id="mapservice_open_map" data-i18n="Open Map">Open Map</div>
-                <div class="menu_button" id="mapservice_test_connection" data-i18n="Test Connection">Test Connection</div>
+                <div class="menu_button" id="mapservice_open_map">打开地图</div>
+                <div class="menu_button" id="mapservice_test_connection">测试连接</div>
             </div>
 
             <hr>
-            <small class="opacity70p" data-i18n="Framework build — map UI and slash commands will be implemented in subsequent milestones.">
-                Framework build — map UI and slash commands will be implemented in subsequent milestones.
-            </small>
+            <small class="opacity70p">框架版本 —— 地图交互界面与指令将在后续版本中实现。</small>
         </div>
     </div>
 </div>

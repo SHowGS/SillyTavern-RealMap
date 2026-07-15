@@ -1,0 +1,15 @@
+.mapservice_settings .inline-drawer-content {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+#mapservice_map_dialog {
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+#mapservice_map_dialog .amap-container {
+    width: 100%;
+    height: 100%;
+}

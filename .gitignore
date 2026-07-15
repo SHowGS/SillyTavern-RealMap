@@ -1,0 +1,13 @@
+# Editor / OS cruft
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*.log
+
+# Local secrets — never commit real Amap keys
+.env
+*.local
+secrets.json

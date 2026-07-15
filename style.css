@@ -3,3 +3,7 @@
     flex-direction: column;
     gap: 8px;
 }
+
+#realmap_test_connection {
+    white-space: nowrap;
+}

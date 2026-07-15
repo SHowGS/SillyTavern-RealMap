@@ -9,11 +9,19 @@ const LOADER_URL = 'https://webapi.amap.com/loader.js';
  * @typedef {Object} RealMapSettings
  * @property {string} key Amap JS API key
  * @property {string} securityCode Amap securityJsCode
+ * @property {string} llmSource LLM provider id
+ * @property {string} llmCustomUrl Custom OpenAI-compatible base URL
+ * @property {string} llmApiKey LLM API key
+ * @property {string} llmModel LLM model id
  */
 
 const DEFAULT_SETTINGS = {
     key: '',
     securityCode: '',
+    llmSource: 'openai',
+    llmCustomUrl: '',
+    llmApiKey: '',
+    llmModel: '',
 };
 
 function ensureSettings() {
@@ -101,6 +109,29 @@ function bindSettings() {
         saveSettingsDebounced();
     });
     $('#realmap_test_connection').on('click', () => void testConnection());
+
+    $('#realmap_llm_source').val(s.llmSource).on('change', function () {
+        s.llmSource = String($(this).val());
+        toggleLlmCustomUrl();
+        saveSettingsDebounced();
+    });
+    $('#realmap_llm_custom_url').val(s.llmCustomUrl).on('input', function () {
+        s.llmCustomUrl = String($(this).val());
+        saveSettingsDebounced();
+    });
+    $('#realmap_llm_api_key').val(s.llmApiKey).on('input', function () {
+        s.llmApiKey = String($(this).val());
+        saveSettingsDebounced();
+    });
+    $('#realmap_llm_model').val(s.llmModel).on('input', function () {
+        s.llmModel = String($(this).val());
+        saveSettingsDebounced();
+    });
+    toggleLlmCustomUrl();
+}
+
+function toggleLlmCustomUrl() {
+    $('#realmap_llm_custom_url_block').toggle($('#realmap_llm_source').val() === 'custom');
 }
 
 export async function init() {

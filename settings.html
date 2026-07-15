@@ -17,6 +17,30 @@
             <div class="menu_button" id="realmap_test_connection">测试连接</div>
 
             <hr>
+
+            <b>LLM API 配置</b>
+            <small>用于扩展自身的地点描述生成 / 解析调用（OpenAI 兼容接口）。</small>
+
+            <label for="realmap_llm_source">API 类型</label>
+            <select id="realmap_llm_source" class="text_pole">
+                <option value="openai">OpenAI</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="custom">自定义 (OpenAI 兼容)</option>
+            </select>
+
+            <div id="realmap_llm_custom_url_block">
+                <label for="realmap_llm_custom_url">Base URL</label>
+                <input id="realmap_llm_custom_url" class="text_pole" type="text" autocomplete="off" placeholder="https://api.example.com/v1" />
+            </div>
+
+            <label for="realmap_llm_api_key">API Key</label>
+            <input id="realmap_llm_api_key" class="text_pole" type="password" autocomplete="off" placeholder="sk-..." />
+
+            <label for="realmap_llm_model">模型</label>
+            <input id="realmap_llm_model" class="text_pole" type="text" autocomplete="off" placeholder="gpt-4o-mini" />
+
+            <hr>
             <small class="opacity70p">框架版本 —— 地图交互界面与指令将在后续版本中实现。</small>
         </div>
     </div>

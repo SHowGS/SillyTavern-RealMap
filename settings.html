@@ -1,4 +1,4 @@
-<div class="mapservice_settings">
+<div class="realmap_settings">
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
             <b>现实地图</b>
@@ -9,19 +9,19 @@
 
             <hr>
 
-            <label for="mapservice_key">高德 JS API Key</label>
-            <input id="mapservice_key" class="text_pole" type="password" autocomplete="off" placeholder="Web端 (JS API) Key" />
-            <label for="mapservice_security_code">安全密钥 (securityJsCode)</label>
-            <input id="mapservice_security_code" class="text_pole" type="password" autocomplete="off" placeholder="securityJsCode" />
+            <label for="realmap_key">高德 JS API Key</label>
+            <input id="realmap_key" class="text_pole" type="password" autocomplete="off" placeholder="Web端 (JS API) Key" />
+            <label for="realmap_security_code">安全密钥 (securityJsCode)</label>
+            <input id="realmap_security_code" class="text_pole" type="password" autocomplete="off" placeholder="securityJsCode" />
 
             <div class="flex-container flexGap5">
                 <div class="flex1">
-                    <label for="mapservice_default_city">默认城市</label>
-                    <input id="mapservice_default_city" class="text_pole" type="text" placeholder="北京" />
+                    <label for="realmap_default_city">默认城市</label>
+                    <input id="realmap_default_city" class="text_pole" type="text" placeholder="北京" />
                 </div>
                 <div class="flex1">
-                    <label for="mapservice_map_style">地图样式</label>
-                    <select id="mapservice_map_style" class="text_pole">
+                    <label for="realmap_map_style">地图样式</label>
+                    <select id="realmap_map_style" class="text_pole">
                         <option value="amap://styles/normal">标准</option>
                         <option value="amap://styles/dark">幻影黑</option>
                         <option value="amap://styles/light">月光银</option>
@@ -36,15 +36,15 @@
             </div>
 
             <div class="flex-container flexGap5">
-                <label class="checkbox_label" for="mapservice_inject_context">
-                    <input id="mapservice_inject_context" type="checkbox" />
+                <label class="checkbox_label" for="realmap_inject_context">
+                    <input id="realmap_inject_context" type="checkbox" />
                     <span>将地图上下文注入提示词</span>
                 </label>
             </div>
 
             <div class="flex-container flexGap5">
-                <div class="menu_button" id="mapservice_open_map">打开地图</div>
-                <div class="menu_button" id="mapservice_test_connection">测试连接</div>
+                <div class="menu_button" id="realmap_open_map">打开地图</div>
+                <div class="menu_button" id="realmap_test_connection">测试连接</div>
             </div>
 
             <hr>

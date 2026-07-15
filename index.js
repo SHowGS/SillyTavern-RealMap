@@ -2,11 +2,11 @@ import { extension_settings, renderExtensionTemplateAsync } from '../../../exten
 import { saveSettingsDebounced } from '../../../../script.js';
 import { t } from '../../../i18n.js';
 
-const MODULE_NAME = 'mapservice';
+const MODULE_NAME = 'realmap';
 const LOADER_URL = 'https://webapi.amap.com/loader.js';
 
 /**
- * @typedef {Object} MapServiceSettings
+ * @typedef {Object} RealMapSettings
  * @property {string} key Amap JS API key
  * @property {string} securityCode Amap securityJsCode
  * @property {string} defaultCity Default city for searches / weather
@@ -76,7 +76,7 @@ async function loadAmap() {
 async function openMap() {
     const AMap = await loadAmap();
     const s = ensureSettings();
-    const dialog = $('<div id="mapservice_map_dialog" style="width:100%;height:600px"></div>');
+    const dialog = $('<div id="realmap_map_dialog" style="width:100%;height:600px"></div>');
     import('../../../popup.js').then(({ callGenericPopup, POPUP_TYPE }) => {
         callGenericPopup(dialog, POPUP_TYPE.TEXT, '', { wide: true, large: true, okButton: 'Close' }).finally(() => {
             map && map.destroy();
@@ -113,35 +113,35 @@ async function testConnection() {
 
 function bindSettings() {
     const s = ensureSettings();
-    $('#mapservice_key').val(s.key).on('input', function () {
+    $('#realmap_key').val(s.key).on('input', function () {
         s.key = String($(this).val());
         amapPromise = null;
         saveSettingsDebounced();
     });
-    $('#mapservice_security_code').val(s.securityCode).on('input', function () {
+    $('#realmap_security_code').val(s.securityCode).on('input', function () {
         s.securityCode = String($(this).val());
         amapPromise = null;
         saveSettingsDebounced();
     });
-    $('#mapservice_default_city').val(s.defaultCity).on('input', function () {
+    $('#realmap_default_city').val(s.defaultCity).on('input', function () {
         s.defaultCity = String($(this).val());
         saveSettingsDebounced();
     });
-    $('#mapservice_map_style').val(s.mapStyle).on('change', function () {
+    $('#realmap_map_style').val(s.mapStyle).on('change', function () {
         s.mapStyle = String($(this).val());
         saveSettingsDebounced();
     });
-    $('#mapservice_inject_context').prop('checked', !!s.injectContext).on('change', function () {
+    $('#realmap_inject_context').prop('checked', !!s.injectContext).on('change', function () {
         s.injectContext = !!$(this).prop('checked');
         saveSettingsDebounced();
     });
-    $('#mapservice_open_map').on('click', () => void openMap());
-    $('#mapservice_test_connection').on('click', () => void testConnection());
+    $('#realmap_open_map').on('click', () => void openMap());
+    $('#realmap_test_connection').on('click', () => void testConnection());
 }
 
 export async function init() {
     const settingsHtml = await renderExtensionTemplateAsync('third-party/SillyTavern-RealMap', 'settings');
     $('#extensions_settings').append(settingsHtml);
     bindSettings();
-    console.debug('[MapService] initialized');
+    console.debug('[realmap] initialized');
 }

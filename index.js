@@ -9,13 +9,11 @@ const LOADER_URL = 'https://webapi.amap.com/loader.js';
  * @typedef {Object} RealMapSettings
  * @property {string} key Amap JS API key
  * @property {string} securityCode Amap securityJsCode
- * @property {boolean} injectContext Whether to inject map context into prompt
  */
 
 const DEFAULT_SETTINGS = {
     key: '',
     securityCode: '',
-    injectContext: false,
 };
 
 function ensureSettings() {
@@ -69,20 +67,6 @@ async function loadAmap() {
     return amapPromise;
 }
 
-async function openMap() {
-    const AMap = await loadAmap();
-    const dialog = $('<div id="realmap_map_dialog" style="width:100%;height:600px"></div>');
-    import('../../../popup.js').then(({ callGenericPopup, POPUP_TYPE }) => {
-        callGenericPopup(dialog, POPUP_TYPE.TEXT, '', { wide: true, large: true, okButton: 'Close' }).finally(() => {
-            map && map.destroy();
-        });
-        const map = new AMap.Map(dialog[0], {
-            zoom: 12,
-        });
-        map.addControl(new AMap.Scale());
-    });
-}
-
 async function testConnection() {
     try {
         const AMap = await loadAmap();
@@ -116,11 +100,6 @@ function bindSettings() {
         amapPromise = null;
         saveSettingsDebounced();
     });
-    $('#realmap_inject_context').prop('checked', !!s.injectContext).on('change', function () {
-        s.injectContext = !!$(this).prop('checked');
-        saveSettingsDebounced();
-    });
-    $('#realmap_open_map').on('click', () => void openMap());
     $('#realmap_test_connection').on('click', () => void testConnection());
 }
 

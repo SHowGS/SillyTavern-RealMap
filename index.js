@@ -9,16 +9,12 @@ const LOADER_URL = 'https://webapi.amap.com/loader.js';
  * @typedef {Object} RealMapSettings
  * @property {string} key Amap JS API key
  * @property {string} securityCode Amap securityJsCode
- * @property {string} defaultCity Default city for searches / weather
- * @property {string} mapStyle Map style id, e.g. amap://styles/dark
  * @property {boolean} injectContext Whether to inject map context into prompt
  */
 
 const DEFAULT_SETTINGS = {
     key: '',
     securityCode: '',
-    defaultCity: '北京',
-    mapStyle: 'amap://styles/normal',
     injectContext: false,
 };
 
@@ -75,7 +71,6 @@ async function loadAmap() {
 
 async function openMap() {
     const AMap = await loadAmap();
-    const s = ensureSettings();
     const dialog = $('<div id="realmap_map_dialog" style="width:100%;height:600px"></div>');
     import('../../../popup.js').then(({ callGenericPopup, POPUP_TYPE }) => {
         callGenericPopup(dialog, POPUP_TYPE.TEXT, '', { wide: true, large: true, okButton: 'Close' }).finally(() => {
@@ -83,7 +78,6 @@ async function openMap() {
         });
         const map = new AMap.Map(dialog[0], {
             zoom: 12,
-            mapStyle: s.mapStyle,
         });
         map.addControl(new AMap.Scale());
     });
@@ -92,15 +86,14 @@ async function openMap() {
 async function testConnection() {
     try {
         const AMap = await loadAmap();
-        const s = ensureSettings();
         let resolved = false;
         const district = new AMap.DistrictSearch({ level: 'city', subdistrict: 0 });
-        district.search(s.defaultCity || '北京', (status, result) => {
+        district.search('北京', (status, result) => {
             resolved = true;
             if (status === 'complete' && result.districtList && result.districtList.length) {
                 toastr.success(t`Amap connection OK — center: ${result.districtList[0].center}`);
             } else {
-                toastr.warning(t`Amap loaded but query returned no district for "${s.defaultCity}".`);
+                toastr.warning(t`Amap loaded but query returned no district.`);
             }
         });
         setTimeout(() => {
@@ -121,14 +114,6 @@ function bindSettings() {
     $('#realmap_security_code').val(s.securityCode).on('input', function () {
         s.securityCode = String($(this).val());
         amapPromise = null;
-        saveSettingsDebounced();
-    });
-    $('#realmap_default_city').val(s.defaultCity).on('input', function () {
-        s.defaultCity = String($(this).val());
-        saveSettingsDebounced();
-    });
-    $('#realmap_map_style').val(s.mapStyle).on('change', function () {
-        s.mapStyle = String($(this).val());
         saveSettingsDebounced();
     });
     $('#realmap_inject_context').prop('checked', !!s.injectContext).on('change', function () {

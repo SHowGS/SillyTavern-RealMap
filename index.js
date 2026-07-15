@@ -137,23 +137,39 @@ async function refreshLlmModels() {
 }
 
 async function testConnection() {
+    const s = ensureSettings();
+    console.log('[realmap] testConnection settings:', { hasKey: !!s.key, hasSecurity: !!s.securityCode, keyLen: s.key.length });
     try {
         const AMap = await loadAmap();
+        // 用一个隐藏容器创建真实地图实例，监听 complete 事件以验证 key/securityCode 有效性
+        let container = document.getElementById('realmap_test_container');
+        if (!container) {
+            container = document.createElement('div');
+            container.id = 'realmap_test_container';
+            container.style.cssText = 'position:fixed;left:-9999px;top:0;width:300px;height:300px;';
+            document.body.appendChild(container);
+        }
         let resolved = false;
-        const district = new AMap.DistrictSearch({ level: 'city', subdistrict: 0 });
-        district.search('北京', (status, result) => {
+        const map = new AMap.Map(container, { zoom: 12 });
+        map.on('complete', () => {
             resolved = true;
-            if (status === 'complete' && result.districtList && result.districtList.length) {
-                toastr.success(t`Amap connection OK — center: ${result.districtList[0].center}`);
-            } else {
-                toastr.warning(t`Amap loaded but query returned no district.`);
-            }
+            map.destroy();
+            toastr.success(t`高德地图连接成功（key 与安全密钥有效）。`);
+        });
+        map.on('error', (e) => {
+            resolved = true;
+            map.destroy();
+            toastr.error(t`高德地图加载失败：${e?.info || JSON.stringify(e)}`);
         });
         setTimeout(() => {
-            if (!resolved) toastr.info(t`Amap loaded; query still pending.`);
-        }, 5000);
+            if (!resolved) {
+                resolved = true;
+                map.destroy();
+                toastr.info(t`高德地图已加载，但瓦片 complete 事件超时（key 可能受限）。`);
+            }
+        }, 8000);
     } catch (e) {
-        toastr.error(String(t`Amap connection failed: `) + e.message);
+        toastr.error(String(t`高德地图连接失败：`) + e.message);
     }
 }
 

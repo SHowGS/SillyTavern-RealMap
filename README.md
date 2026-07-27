@@ -1,116 +1,199 @@
 # SillyTavern-RealMap
 
-为 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 角色扮演注入真实地理位置的第三方扩展。核心是接入 **高德地图 JS API 2.0**，在每一轮 AI 回复结束时由插件 LLM 推断用户角色当前所处的位置并落库，让对话拥有可回溯的地理轨迹，并以可拖动小窗 + 全屏两种形态呈现地图。
+为[SillyTavern](https://github.com/SillyTavern/SillyTavern)角色扮演对话提供真实地理位置能力。扩展会在每轮AI回复完成后调用独立的LLM判断用户角色所在地点，再通过高德地图JS API 2.0完成地理编码、路线解析与地图展示。
 
-> 仓库正在开发中：前端框架、设置面板与位置推断状态机已落地；插件 LLM 推断链路、提示词集成、Slash 命令等在后续版本中完善。
+> 项目仍在开发中。位置推断、地图小窗、浏览器全屏、地点搜索、路线预览、移动端悬浮球和位置上下文注入均已接入；Slash命令等功能仍在规划中。
 
-## 功能概览
+## 功能
 
-### 设置面板（扩展抽屉中）
-- **双 Tab**：API 配置 / 提示词配置。
-- **API 配置**
-  - 高德 JS API Key 与安全密钥（`securityJsCode`）。
-  - **测试连接** 按钮，用真实 `AMap.Map` 实例加载瓦片验证 key 与密钥有效性。
-  - 插件 LLM 配置：API 类型（OpenAI / OpenRouter / DeepSeek / 自定义 OpenAI 兼容）、Base URL、API Key。
-  - 模型下拉框 + **获取模型** 按钮（调 `/v1/models` 拉取）。
-- **提示词配置**
-  - 系统提示词、追加约束、输出 JSON 格式、工具说明（预留）、null 用户话术 五段可编辑。
-  - **恢复默认** 按钮一键回写所有默认值。
-  - 空即空：用户清空字段即发送空；默认值仅靠「恢复默认」写回。
-- 拓展页顶部「**启用现实地图**」按钮：仅当有聊天打开时显示，已启用时变灰不可点。
+### 位置推断
 
-### 前端地图
-- **小窗**：默认右下角 320×180，16:9 地图容器，可拖动，位置记忆（存 `accountStorage`，与 SillyTavern 的"移动 UI"开关无关）。
-  - 小窗状态禁用鼠标滚轮与地图拖动，仅右下角 +/− 单级缩放。
-  - 右上角「禁用」文字按钮：hover 红色，点击弹确认 + 「同时清除本聊天的历史地图数据」勾选。
-  - 点击地图容器切换全屏。
-- **全屏**：基于 SillyTavern `Popup.show` 的原生模态，覆盖所有 UI。
-  - 支持滚轮缩放、地图拖动。
-  - 右下角 +/− 按钮。
-  - 下方居中搜索框，结果向上展开列表；点列表项定位并放虚线 marker。
-  - 三类 marker 可同时存在、同类最多一个：红色 = user 位置，黄色 = 目的地，虚线 = 选中位置。
-  - 点击地图放虚线 marker，紧贴旁边弹下拉菜单：「前往此处」（仅填充输入框，由用户手动发送）/「设为当前位置」（弹确认覆盖最后一轮 AI 消息的 `extra.realmap`）。
+- 监听每轮AI消息完成事件，读取上一轮位置、相关用户消息和AI正文。
+- 支持OpenAI、OpenRouter、DeepSeek及自定义OpenAI兼容接口。
+- 支持两类位置结果：
+  - `idle`：角色停留在某个地点，经高德地理编码后保存坐标、格式化地址和周边POI摘要。
+  - `moving`：角色正在移动，经高德驾车、步行、骑行或公交路线服务解析后保存起终点、距离、时长和路线折线。
+- 系统提示词、assistant确认回复和user上下文模板统一由源码文件维护。
+- 小窗和移动端全屏均提供“重新判断”入口。
+- 推断成功后，当前位置和周边POI会作为system扩展提示词注入后续对话。
 
-### 位置数据与回档
-- 位置数据落在**每条 AI 消息的 `extra.realmap`** 上（不额外维护 chat-level 索引）。
-- 删消息 / swipe 切换等 SillyTavern 原生操作天然对齐位置数据；"从第 N 楼重开"等任何回档方式都自动生效，扩展不自建回档系统。
-- 写入时同步到 `swipe_info[swipe_id].extra` 防止 swipe 切换丢失。
-- 全屏手动覆盖位置会落库到最近一条 AI 消息。
+### 地图界面
 
-### 位置推断流程（规划中，当前为 stub）
-1. `CHARACTER_MESSAGE_RENDERED`（makeLast）触发。
-2. 收集上一轮与本轮的 user/AI 正文、上一轮 `extra.realmap`（仅作证据）。
-3. 调插件 LLM 输出 JSON：`idle` / `moving` / `null`。
-4. 非空时调高德 `PlaceSearch` + `Geocoder`（idle）/ `Driving | Walking | Riding | Transfer`（moving）转换为坐标。
-5. 坐标写入本轮 AI 消息 `extra.realmap` 并同步 swipe。
-6. null 时：弹 toastr 报错；上一轮有位置则沿用并标 `degraded`，长期保存；上一轮无则留空，等待用户手动设置。
-7. 插件 LLM **每轮无状态独立判断**，上一轮位置只是输入证据而非状态。
+- 桌面端提供默认`320×240`的可拖动小窗，窗口位置保存在`accountStorage`。
+- 小窗支持地图拖动、滚轮缩放、缩放按钮、标准/卫星底图切换、卫星路网叠加和全景入口。
+- 全屏使用浏览器Fullscreen API；浏览器拒绝全屏请求时，仍会使用铺满视口的界面。
+- 全屏支持全国地点搜索，并结合当前位置对结果排序和显示距离。
+- 地图使用红色标记当前位置、黄色标记目的地、蓝色标记当前选择。
+- 点击地点后可：
+  - 将步行、骑行、驾车或公交指令填入SillyTavern输入框，由用户确认发送。
+  - 覆盖最近一条AI消息记录的当前位置。
+  - 预览驾车、步行、骑行或公交路线。
+- 驾车预览可切换“高速优先”和“不走高速”；公交预览可切换“优先地铁”和“优先公交”，并展示线路、站点、步行段、用时、距离及费用信息。
+- “全景”会在新标签页打开百度地图，并通过`coord_type=gcj02`传递高德坐标。
 
-### 不影响正文的设计底线
-- 除「设为当前位置」显式覆盖外，前端任何操作**不直接调用 LLM**。
-- 所有高德调用仅服务于前端显示，不写正文。
-- 「前往此处」等影响正文的动作**只通过输入框注入提示词**，由用户手动发送后交给插件 LLM 在常规流程中处理。
+### 移动端
+
+- 使用可拖动的地图悬浮球代替桌面小窗。
+- 悬浮球可吸附屏幕边缘，点击后进入全屏地图。
+- 全屏内提供“禁用”和“重新判断”按钮。
+- 公交详情以底部面板显示，路线策略切换控件会适配面板高度。
+
+### 聊天状态与回档
+
+- 启用状态按聊天保存在`chat_metadata.realmap_enabled`。
+- 每条AI消息的位置保存在`message.extra.realmap`，并同步到当前`swipe_info[swipe_id].extra`。
+- 删除消息、切换swipe和从历史楼层继续聊天时，位置会随SillyTavern原生消息状态一起变化。
+- 打开带有历史位置的聊天时，扩展会从最近一条AI消息恢复地图状态。
+- 禁用扩展时可选择一并清除当前聊天内的历史位置数据，聊天正文不会被改动。
 
 ## 安装
 
-### 通过 SillyTavern 内置安装器
-1. SillyTavern → 扩展 → 安装扩展。
-2. 输入仓库 URL：
-   ```
+### 使用SillyTavern扩展安装器
+
+1. 打开“SillyTavern→扩展→安装扩展”。
+2. 输入仓库地址：
+
+   ```text
    https://github.com/SHowGS/SillyTavern-RealMap
    ```
-3. 重载页面后启用 **现实地图**。
 
-### 手动克隆
+3. 完成安装后重载页面。
+
+### 手动安装
+
 ```bash
 cd public/scripts/extensions/third-party
 git clone https://github.com/SHowGS/SillyTavern-RealMap.git
 ```
-重载 SillyTavern。
+
+克隆完成后重载SillyTavern。
 
 ## 配置
 
-1. 在 <https://console.amap.com/dev/key> 申请 **Web端 JS API** 类型的 Key 与对应 **安全密钥**。
-2. SillyTavern → 扩展 → 现实地图 → API 配置 tab。
-3. 填入高德 Key 与安全密钥（仅存本机 SillyTavern 设置，不进仓库）。
-4. 点击「测试连接」验证。
-5. 填入插件 LLM 配置（API 类型、Key、模型可点「获取模型」拉取）。
-6. 提示词配置 tab 可按需修改推断提示词，留空即发送空。
+### 1.高德地图
 
-## 为什么优先 JS API
+1. 前往[高德开放平台](https://console.amap.com/dev/key)创建应用。
+2. 申请“Web端(JS API)”类型的Key及对应的安全密钥`securityJsCode`。
+3. 打开“SillyTavern→扩展→现实地图→API配置”。
+4. 填写Key和安全密钥，点击“测试连接”。
 
-本扩展优先使用高德 **JS API 2.0**（浏览器端 loader），避免自建后端代理与 CORS 的繁文缛节，自洽分发，计费按地图会话而非请求。Web API 仅在 JS API 不足时纳入考量。
+未配置高德Key时，桌面小窗会保留并显示配置提示；地图、地点解析和路线能力需要有效Key。
+
+### 2.位置推断LLM
+
+1. 选择API类型。
+2. 自定义兼容接口需填写包含版本路径的Base URL，例如`https://api.example.com/v1`。
+3. 填写API Key。
+4. 点击“获取模型”，再选择模型。
+
+扩展会请求以下OpenAI兼容端点：
+
+- `GET /models`
+- `POST /chat/completions`
+
+未配置LLM API Key或模型时，不会发起位置推断请求。
+
+### 3.提示词源码
+
+四段提示词集中保存在`prompts.js`：
+
+- `DEFAULT_SYSTEM_PROMPT`：system提示词
+- `DEFAULT_ASSISTANT_REPLY`：assistant确认回复
+- `CONTEXT_PROMPT_TEMPLATE`：user上下文模板
+- `DEFAULT_ASSISTANT_PREFILL`：末尾assistant预填充，默认内容为`{`
+
+实际请求顺序为`system→assistant→user→assistant预填充`。扩展设置页不提供提示词编辑功能，修改`prompts.js`后重载页面即可生效。旧版浏览器设置中的提示词字段会被清理，不会覆盖源码。
+
+## 数据格式
+
+静止位置示例：
+
+```json
+{
+  "v": 2,
+  "captured_at": 1750000000000,
+  "mode": "idle",
+  "lng": 116.397,
+  "lat": 39.908,
+  "label": "北京市东城区天安门",
+  "poi": true,
+  "nearby": "周边：天安门(北120m)"
+}
+```
+
+移动状态示例：
+
+```json
+{
+  "v": 2,
+  "captured_at": 1750000000000,
+  "mode": "moving",
+  "from": {
+    "lng": 116.397,
+    "lat": 39.908,
+    "label": "天安门"
+  },
+  "to": {
+    "lng": 116.403,
+    "lat": 39.924,
+    "label": "故宫博物院"
+  },
+  "route_mode": "walking",
+  "duration_min": 18,
+  "distance": 1400,
+  "polyline": []
+}
+```
+
+## 隐私与行为边界
+
+- 高德Key和LLM API Key保存在SillyTavern扩展设置中。
+- 启用位置推断后，扩展会将相关对话正文、上一轮位置和源码提示词发送到所配置的LLM服务。
+- 地图搜索、地理编码、周边POI和路线请求会发送到高德地图服务。
+- “前往此处”仅填写输入框，不会自动发送消息。
+- “设置此地为当前位置”会在确认后修改最近一条AI消息的`extra.realmap`。
+- 当前版本会在每次LLM请求结束后显示调试弹窗，其中包含请求消息、原始输出或错误信息。
 
 ## 要求
 
-- SillyTavern 客户端 >= `1.12.0`。
-- 高德开放平台账号（有免费额度）。
-- HTTPS 浏览器环境（JS API 2.0 在生产域名拒绝明文 HTTP）。
-- 一个 OpenAI 兼容的插件 LLM 端点（用于位置推断；后续阶段接入）。
+- SillyTavern`>=1.12.0`
+- 支持ES模块和Fullscreen API的现代浏览器
+- 高德开放平台Web端JS API Key及安全密钥
+- 位置推断所需的OpenAI兼容LLM端点
 
-## 模块结构
+生产环境建议使用HTTPS，以满足地图API和浏览器全屏能力的安全要求。
 
-```
-manifest.json
-settings.html        # 双 tab 设置面板 + 启用按钮
-style.css            # 小窗 / 全屏 / 菜单 / 搜索结果样式
-index.js             # 入口：设置绑定、chat_changed 钩子、enable 询问、禁用弹窗
-amap.js              # 高德 loader 共享 + 测试连接
-state.js             # chat_metadata 读写、accountStorage 位置记忆、可见消息与最后 AI 消息工具、历史清除
-minimap.js           # 16:9 小窗：拖动 / 缩放 / 全屏入口 / 禁用回调
-fullscreen.js        # Popup.show 全屏：搜索 / 点击 marker / 菜单 / 覆盖位置
+## 项目结构
+
+```text
+manifest.json        # 扩展清单
+settings.html        # API配置和启用控制
+style.css            # 小窗、全屏、路线面板和移动端样式
+index.js             # 初始化、聊天事件、LLM推断、位置解析和提示词注入
+prompts.js           # system、assistant、user上下文及末尾预填充
+amap.js              # 高德JS API加载与连接测试
+state.js             # 聊天元数据、消息位置、窗口位置和坐标工具
+minimap.js           # 桌面小窗与移动端悬浮球
+fullscreen.js        # 全屏地图、搜索、地点操作和路线预览
+layer-control.js     # 标准、卫星及路网图层控制
+place-search.js      # 全国/附近地点搜索、候选去重和统一评分
 ```
 
 ## Roadmap
 
-- [x] 设置面板（双 tab：API / 提示词）+ 提示词五段控件 + 恢复默认。
-- [x] 前端小窗 + 全屏 + enable 状态机 + 拓展页启用按钮。
-- [x] full map markers、搜索、覆盖当前位置。
-- [ ] 插件 LLM 推断链路接入（当前为 stub：仅沿用上轮位置）。
-- [ ] idle/moving 两种 JSON 动作的高德转换。
-- [ ] Slash 命令：`/realmap.set`、`/realmap.retry`、`/realmap.clear`。
-- [ ] 提示词自动注入（基于本轮位置）。
+- [x] 按聊天启用、禁用及历史位置清理
+- [x] 独立LLM位置推断
+- [x] `idle`和`moving`位置解析
+- [x] 位置与周边POI上下文注入
+- [x] 桌面地图小窗和移动端悬浮球
+- [x] 浏览器全屏地图、地点搜索和手动位置覆盖
+- [x] 标准/卫星底图与路网叠加
+- [x] 驾车、步行、骑行和公交路线预览
+- [x] 用户搜索与LLM位置解析共用地点搜索和评分
+- [ ] Slash命令
+- [ ] 更完整的错误恢复与无位置状态提示
+- [ ] 设置面板国际化
 
 ## License
 
-MIT — 见 [LICENSE](LICENSE)。
+本项目采用MIT许可证，详见[LICENSE](LICENSE)。

@@ -1,5 +1,5 @@
-import { extension_settings, getContext } from '../../../extensions.js';
-import { chat_metadata, saveMetadataDebounced, saveMetadata } from '../../../../script.js';
+import { extension_settings, getContext, saveMetadataDebounced } from '../../../extensions.js';
+import { chat_metadata, saveMetadata } from '../../../../script.js';
 
 export { extension_settings, chat_metadata };
 
@@ -115,13 +115,9 @@ export function loadWindowPos() {
     const x = as.getItem(LOC_KEYS.x);
     const y = as.getItem(LOC_KEYS.y);
     const w = as.getItem(LOC_KEYS.w);
-    const h = as.getItem(LOC_KEYS.h);
     if (x === null || y === null) return null;
     const num = v => (v === null ? null : Number(v));
-    return {
-        x: num(x), y: num(y),
-        w: num(w) ?? 320, h: num(h) ?? 180,
-    };
+    return { x: num(x), y: num(y), w: num(w) ?? 320 };
 }
 
 export function syncMesToSwipe(message, swipeId) {
@@ -132,4 +128,27 @@ export function syncMesToSwipe(message, swipeId) {
     si.gen_started = message.gen_started;
     si.gen_finished = message.gen_finished;
     si.extra = structuredClone(message.extra ?? {});
+}
+
+// ===== 坐标转换 GCJ-02 (高德) -> BD-09 (百度) =====
+const X_PI = (Math.PI * 3000.0) / 180.0;
+
+export function gcj02ToBd09(lng, lat) {
+    const z = Math.sqrt(lng * lng + lat * lat) + 0.00002 * Math.sin(lat * X_PI);
+    const theta = Math.atan2(lat, lng) + 0.000003 * Math.cos(lng * X_PI);
+    return {
+        lng: z * Math.cos(theta) + 0.0065,
+        lat: z * Math.sin(theta) + 0.006,
+    };
+}
+
+// 取 user 角色当前所在位置：
+//   idle   -> state.lng / state.lat
+//   moving -> state.from (用户所在起点，未抵达 to)
+export function getCurrentPosition() {
+    const s = getChatState();
+    if (!s) return null;
+    if (typeof s.lng === 'number' && typeof s.lat === 'number') return { lng: s.lng, lat: s.lat };
+    if (s.mode === 'moving' && s.from) return { lng: s.from.lng, lat: s.from.lat };
+    return null;
 }

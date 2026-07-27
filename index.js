@@ -1,12 +1,21 @@
 import { extension_settings, renderExtensionTemplateAsync, getContext } from '../../../extensions.js';
-import { saveSettingsDebounced, eventSource, event_types, chat_metadata } from '../../../../script.js';
+import { saveSettingsDebounced, eventSource, event_types, chat_metadata, setExtensionPrompt, extension_prompt_types, extension_prompt_roles, setExternalAbortController, deactivateSendButtons, activateSendButtons } from '../../../../script.js';
 import { t } from '../../../i18n.js';
-import { Popup, POPUP_RESULT } from '../../../popup.js';
-import { setExtensionEnabledForChat, isExtensionEnabledForChat, findLastAiMessage, getVisibleMessages, clearAllChatLocations, setChatState, getChatState } from './state.js';
+import { Popup, POPUP_RESULT, POPUP_TYPE } from '../../../popup.js';
+import { resetAmapCache } from './amap.js';
+import { setExtensionEnabledForChat, isExtensionEnabledForChat, findLastAiMessage, getVisibleMessages, clearAllChatLocations, setChatState, getChatState, syncMesToSwipe, getCurrentPosition } from './state.js';
 import { initMinimap, showMinimap, hideMinimap, refreshMap } from './minimap.js';
+import { DEFAULT_SYSTEM_PROMPT, DEFAULT_ASSISTANT_REPLY, DEFAULT_ASSISTANT_PREFILL, renderContextPrompt } from './prompts.js';
+import { searchRankedPlaces, getRankedPoiLocation } from './place-search.js';
 
 const MODULE_NAME = 'realmap';
 const LOADER_URL = 'https://webapi.amap.com/loader.js';
+const REALMAP_INJECT_KEY = 'realmapLocationContext';
+const MIN_INFERENCE_PLACE_SCORE = 80;
+
+let chatChangedTimer = null;
+let chatChangedRunning = false;
+let llmAbortController = null;
 
 /**
  * @typedef {Object} RealMapSettings
@@ -16,20 +25,7 @@ const LOADER_URL = 'https://webapi.amap.com/loader.js';
  * @property {string} llmCustomUrl Custom OpenAI-compatible base URL
  * @property {string} llmApiKey LLM API key
  * @property {string} llmModel LLM model id
- * @property {string} llmPromptSystem 系统提示词
- * @property {string} llmPromptSuffix 追加约束
- * @property {string} llmPromptJsonSchema 输出 JSON 格式说明
- * @property {string} llmPromptToolSpec 工具说明（预留）
- * @property {string} llmPromptFallback null 时用户话术模板
  */
-
-const DEFAULT_PROMPTS = {
-    system: '你是位置推断助手。你会读到一段角色扮演对话：包含上一轮用户/AI 正文、上一轮确定的位置（如有），以及本轮用户/AI 正文。你的任务是判断本轮结束时用户角色所处的地点，并以 JSON 输出。\n\n规则：\n- 仅依据正文描述判断，不脑补。\n- 上一轮位置仅作参考，不直接沿用，除非本轮正文明确表示原地未动。\n- 输出地点用中文具体名（如「望京 SOHO」「故宫太和殿」），避免行政泛指。\n- 无法确定时输出 {"action":"null","reason":"..."}。',
-    suffix: '一律使用中文地点名。不要解释。只输出 JSON。',
-    json_schema: '{ "action":"idle", "place":"望京SOHO", "poi":true }\n{ "action":"moving", "from":"...","to":"...","route_mode":"walking","duration_min":30 }\n{ "action":"null", "reason":"叙事未含足够地理信息" }',
-    tool_spec: '（保留字段，暂未启用工具调用模式）',
-    fallback: '本轮位置推断失败：{reason}。可在地图上手动确认或调用 /realmap.set 纠正。',
-};
 
 const DEFAULT_SETTINGS = {
     key: '',
@@ -38,24 +34,36 @@ const DEFAULT_SETTINGS = {
     llmCustomUrl: '',
     llmApiKey: '',
     llmModel: '',
-    llmPromptSystem: DEFAULT_PROMPTS.system,
-    llmPromptSuffix: DEFAULT_PROMPTS.suffix,
-    llmPromptJsonSchema: DEFAULT_PROMPTS.json_schema,
-    llmPromptToolSpec: DEFAULT_PROMPTS.tool_spec,
-    llmPromptFallback: DEFAULT_PROMPTS.fallback,
 };
 
 function ensureSettings() {
     if (!extension_settings[MODULE_NAME]) {
         extension_settings[MODULE_NAME] = {};
     }
+    const s = extension_settings[MODULE_NAME];
+    // 提示词统一由prompts.js维护，清理旧版可编辑提示词设置。
+    const legacyPromptKeys = [
+        'llmPrompt',
+        'llmAssistantReply',
+        'llmPrefill',
+        'llmPromptSystem',
+        'llmPromptSuffix',
+        'llmPromptJsonSchema',
+        'llmPromptToolSpec',
+        'llmPromptFallback',
+    ];
+    const hasLegacyPromptSettings = legacyPromptKeys.some(key => Object.prototype.hasOwnProperty.call(s, key));
+    legacyPromptKeys.forEach(key => delete s[key]);
+    if (hasLegacyPromptSettings) {
+        saveSettingsDebounced();
+    }
     // 仅对缺失字段（undefined）填默认；已存在的空字符串视为用户主动清空，保留。
     for (const k of Object.keys(DEFAULT_SETTINGS)) {
-        if (extension_settings[MODULE_NAME][k] === undefined) {
-            extension_settings[MODULE_NAME][k] = DEFAULT_SETTINGS[k];
+        if (s[k] === undefined) {
+            s[k] = DEFAULT_SETTINGS[k];
         }
     }
-    return extension_settings[MODULE_NAME];
+    return s;
 }
 
 let amapPromise = null;
@@ -237,46 +245,6 @@ function bindSettings() {
     $('#realmap_llm_refresh_models').on('click', () => void refreshLlmModels());
     toggleLlmCustomUrl();
 
-    // 提示词五段绑定
-    const promptFields = [
-        ['#realmap_prompt_system', 'llmPromptSystem'],
-        ['#realmap_prompt_suffix', 'llmPromptSuffix'],
-        ['#realmap_prompt_json_schema', 'llmPromptJsonSchema'],
-        ['#realmap_prompt_tool_spec', 'llmPromptToolSpec'],
-        ['#realmap_prompt_fallback', 'llmPromptFallback'],
-    ];
-    for (const [sel, key] of promptFields) {
-        $(sel).val(s[key] ?? '').on('input', function () {
-            s[key] = String($(this).val());
-            saveSettingsDebounced();
-        });
-    }
-
-    // 恢复默认按钮
-    $('#realmap_prompt_reset').on('click', () => {
-        s.llmPromptSystem = DEFAULT_PROMPTS.system;
-        s.llmPromptSuffix = DEFAULT_PROMPTS.suffix;
-        s.llmPromptJsonSchema = DEFAULT_PROMPTS.json_schema;
-        s.llmPromptToolSpec = DEFAULT_PROMPTS.tool_spec;
-        s.llmPromptFallback = DEFAULT_PROMPTS.fallback;
-        $('#realmap_prompt_system').val(DEFAULT_PROMPTS.system);
-        $('#realmap_prompt_suffix').val(DEFAULT_PROMPTS.suffix);
-        $('#realmap_prompt_json_schema').val(DEFAULT_PROMPTS.json_schema);
-        $('#realmap_prompt_tool_spec').val(DEFAULT_PROMPTS.tool_spec);
-        $('#realmap_prompt_fallback').val(DEFAULT_PROMPTS.fallback);
-        saveSettingsDebounced();
-        toastr.success(t`已恢复默认提示词。`);
-    });
-
-    // Tab 切换：每次重载默认显示 api
-    $('.realmap_tab').on('click', function () {
-        const tab = $(this).data('tab');
-        $('.realmap_tab').removeClass('active');
-        $(this).addClass('active');
-        $('.realmap_tab_panel').hide();
-        $(`.realmap_tab_panel[data-panel="${tab}"]`).show();
-    });
-    $('.realmap_tab[data-tab="api"]').trigger('click');
 }
 
 function toggleLlmCustomUrl() {
@@ -288,10 +256,10 @@ export async function init() {
     $('#extensions_settings').append(settingsHtml);
     bindSettings();
     injectMinimapHtml();
-    await initMinimap({ onDisableClick: handleDisableClick });
-    eventSource.on(event_types.CHAT_CHANGED, () => void onChatChanged());
-    eventSource.on(event_types.MESSAGE_DELETED, () => void onChatChanged());
-    eventSource.on(event_types.MESSAGE_EDITED, () => void onChatChanged());
+    await initMinimap({ onDisableClick: handleDisableClick, onRejudge: handleRejudge });
+    eventSource.on(event_types.CHAT_CHANGED, debouncedOnChatChanged);
+    eventSource.on(event_types.MESSAGE_DELETED, debouncedOnChatChanged);
+    eventSource.on(event_types.MESSAGE_EDITED, debouncedOnChatChanged);
     eventSource.makeLast(event_types.CHARACTER_MESSAGE_RENDERED, (messageId) => void onAiMessage(messageId));
     onChatChanged();
     $('#realmap_enable_btn').on('click', () => void handleEnableFromSettings());
@@ -301,15 +269,22 @@ export async function init() {
 function injectMinimapHtml() {
     if (!$('#realmap_minimap').length) {
         const html = `
-<div id="realmap_minimap" class="draggable" style="display:none;">
-    <div class="panelControlBar flex-container">
-        <div id="realmap_minimapheader" class="fa-solid fa-grip drag-grabber"></div>
-        <div id="realmap_minimap_close" class="fa-solid fa-circle-xmark dragClose"></div>
-    </div>
-    <div class="realmap_topbar">
+<div id="realmap_minimap" style="display:none;">
+    <div id="realmap_titlebar" class="realmap_titlebar">
+        <span class="realmap_title_text">现实地图</span>
+        <div id="realmap_rejudge_btn" class="realmap_link_btn">重新判断</div>
         <div id="realmap_disable_btn" class="realmap_link_btn">禁用</div>
     </div>
     <div id="realmap_map_container">
+        <div id="realmap_mm_fullscreen_btn" class="realmap_fullscreen_btn" title="全屏">⛶</div>
+        <div class="realmap_layer_ctl">
+            <select id="realmap_mm_layer_select" class="realmap_layer_select">
+                <option value="normal">标准</option>
+                <option value="satellite">卫星</option>
+            </select>
+            <div id="realmap_mm_layer_btn" class="realmap_layer_btn" style="display:none">路网</div>
+            <div id="realmap_mm_panorama_btn" class="realmap_panorama_btn" title="在百度街景中打开">全景</div>
+        </div>
         <div class="realmap_zoom_ctl">
             <div id="realmap_zoom_in" class="realmap_zoom_btn">+</div>
             <div id="realmap_zoom_out" class="realmap_zoom_btn">−</div>
@@ -326,6 +301,20 @@ function isChatOpen() {
     return (ctx.characterId !== undefined) || Boolean(ctx.groupId);
 }
 
+function debouncedOnChatChanged() {
+    clearTimeout(chatChangedTimer);
+    chatChangedTimer = setTimeout(async () => {
+        if (chatChangedRunning) return;
+        chatChangedRunning = true;
+        try {
+            await onChatChanged();
+        } finally {
+            chatChangedRunning = false;
+            updateExtensionPrompt();
+        }
+    }, 100);
+}
+
 async function onChatChanged() {
     refreshEnableButton();
     if (!isChatOpen()) {
@@ -334,6 +323,11 @@ async function onChatChanged() {
     }
     const enabled = isExtensionEnabledForChat();
     if (enabled) {
+        // 刷新后 chat_metadata 可能过期/为空，从最后一条 AI 消息同步位置
+        const last = findLastAiMessage();
+        if (last?.message?.extra?.realmap) {
+            setChatState(last.message.extra.realmap);
+        }
         await refreshMap();
         showMinimap();
         return;
@@ -354,10 +348,7 @@ async function onChatChanged() {
             return;
         }
         setExtensionEnabledForChat(true);
-        const loc = await inferLocationFromVisible();
-        if (!loc) {
-            window.toastr?.warning('无法判断具体位置，请手动设置。');
-        }
+        await inferLocationFromVisible();
         await refreshMap();
         showMinimap();
     } else {
@@ -378,7 +369,14 @@ async function onAiMessage(_messageId) {
     if (!isChatOpen() || !isExtensionEnabledForChat()) return;
     const loc = await inferLocationFromVisible();
     await refreshMap();
-    void loc;
+    updateExtensionPrompt();
+}
+
+async function handleRejudge() {
+    if (!isChatOpen() || !isExtensionEnabledForChat()) return;
+    await inferLocationFromVisible();
+    await refreshMap();
+    updateExtensionPrompt();
 }
 
 function refreshEnableButton() {
@@ -399,8 +397,7 @@ async function handleEnableFromSettings() {
     setExtensionEnabledForChat(true);
     const last = findLastAiMessage();
     if (last) {
-        const loc = await inferLocationFromVisible();
-        if (!loc) window.toastr?.warning('无法判断具体位置，请手动设置。');
+        await inferLocationFromVisible();
     }
     await refreshMap();
     showMinimap();
@@ -440,13 +437,374 @@ async function askEnable(text) {
 }
 
 async function inferLocationFromVisible() {
-    // P1 stub: 暂不接入插件 LLM。读取上一条 AI 消息的 extra.realmap 若存在则沿用，否则返回 null。
+    const s = ensureSettings();
+    if (!s.llmApiKey || !s.llmModel) {
+        return copyPrevLocation();
+    }
+
+    const ctx = getContext();
+    const chat = ctx?.chat;
+    if (!Array.isArray(chat) || chat.length < 2) return null;
+
+    const last = findLastAiMessage();
+    if (!last) return null;
+
+    const messages = buildLlmMessages(chat);
+    const llmResult = await callPluginLlm(s, messages);
+    if (!llmResult) {
+        return copyPrevLocation();
+    }
+
+    const loc = await resolveLocation(llmResult, last);
+    return loc;
+}
+
+function buildLlmMessages(chat) {
+    const visible = chat.filter(m => !m?.is_system && typeof m?.mes === 'string');
+    const lastIdx = visible.length - 1;
+    const prevAiMes = visible.slice(0, lastIdx).reverse().find(m => !m.is_user);
+    const curAiMes = visible[lastIdx];
+    const curUserMes = visible.slice(0, lastIdx).reverse().find(m => m.is_user);
+
+    const prevLoc = prevAiMes?.extra?.realmap;
+    const previousLocation = prevLoc?.label || prevLoc?.from?.label || '无';
+    const contextPrompt = renderContextPrompt({
+        previousLocation,
+        previousAi: prevAiMes?.mes || '无',
+        currentUser: curUserMes?.mes || '无',
+        currentAi: curAiMes?.mes || '无',
+    });
+
+    const messages = [
+        { role: 'system', content: DEFAULT_SYSTEM_PROMPT },
+        { role: 'assistant', content: DEFAULT_ASSISTANT_REPLY },
+        { role: 'user', content: contextPrompt },
+        { role: 'assistant', content: DEFAULT_ASSISTANT_PREFILL },
+    ];
+    return messages;
+}
+
+async function callPluginLlm(s, messages) {
+    const baseUrl = getLlmBaseUrl(s);
+    if (!baseUrl) return null;
+
+    llmAbortController = new AbortController();
+    setExternalAbortController(llmAbortController);
+    deactivateSendButtons();
+
+    let result = null;
+    let rawContent = '';
+    let aborted = false;
+    let errorMsg = '';
+
+    try {
+        const resp = await fetch(`${baseUrl}/chat/completions`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${s.llmApiKey}`,
+            },
+            body: JSON.stringify({
+                model: s.llmModel,
+                messages,
+                temperature: 0.1,
+                max_tokens: 300,
+            }),
+            signal: llmAbortController.signal,
+        });
+        if (!resp.ok) {
+            errorMsg = `HTTP ${resp.status}`;
+        } else {
+            const data = await resp.json();
+            rawContent = data?.choices?.[0]?.message?.content || '';
+            const trailingAssistant = messages.at(-1)?.role === 'assistant'
+                ? String(messages.at(-1)?.content || '')
+                : '';
+            const parseCandidates = [rawContent];
+            if (trailingAssistant && !rawContent.trimStart().startsWith(trailingAssistant)) {
+                parseCandidates.push(`${trailingAssistant}${rawContent}`);
+            }
+            for (const candidate of parseCandidates) {
+                const jsonMatch = candidate.match(/\{[\s\S]*\}/);
+                if (!jsonMatch) continue;
+                try {
+                    result = JSON.parse(jsonMatch[0]);
+                    break;
+                } catch (_) {
+                    // 尝试下一个包含预填充内容的候选文本。
+                }
+            }
+        }
+    } catch (e) {
+        if (e.name === 'AbortError') {
+            aborted = true;
+        } else {
+            errorMsg = e.message;
+        }
+    } finally {
+        llmAbortController = null;
+        activateSendButtons();
+    }
+
+    if (!aborted) {
+        const parts = [`=== 发送给 LLM 的消息 ===\n${JSON.stringify(messages, null, 2)}`];
+        if (rawContent) {
+            parts.push(`=== LLM 原始输出 ===\n${rawContent}`);
+        }
+        if (result) {
+            parts.push(`=== 解析结果 ===\n${JSON.stringify(result, null, 2)}`);
+        } else if (errorMsg) {
+            parts.push(`=== 错误 ===\n${errorMsg}`);
+        } else if (rawContent) {
+            parts.push(`=== 解析结果 ===\nJSON 解析失败`);
+        }
+        const debugText = parts.join('\n\n');
+        const escapeHtml = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const debugHtml = `<pre style="white-space:pre-wrap;font-size:12px;max-height:60vh;overflow-y:auto;color:var(--SmartThemeBodyColor);background:rgba(0,0,0,0.3);padding:12px;border-radius:4px">${escapeHtml(debugText)}</pre>`;
+        const popup = new Popup(debugHtml, POPUP_TYPE.DISPLAY, '', { wide: true, large: true, okButton: '关闭', cancelButton: false });
+        popup.show();
+    }
+
+    return result;
+}
+
+async function resolveLocation(llmResult, lastAiMessage) {
+    if (!llmResult || llmResult.action === 'null') return null;
+    const AMap = await loadAmap();
+
+    if (llmResult.action === 'idle' && llmResult.place) {
+        return await resolveIdle(AMap, llmResult, lastAiMessage);
+    }
+    if (llmResult.action === 'moving' && llmResult.from && llmResult.to) {
+        return await resolveMoving(AMap, llmResult, lastAiMessage);
+    }
+    return null;
+}
+
+async function resolveIdle(AMap, llmResult, lastAiMessage) {
+    const resolvedPlace = await resolvePlaceCandidate(AMap, llmResult.place, getCurrentPosition());
+    if (!resolvedPlace) return null;
+    const { lng, lat } = resolvedPlace;
+
+    const placeSearch = new AMap.PlaceSearch({ pageSize: 10, pageIndex: 1 });
+    const nearby = await fetchNearbySummary(placeSearch, lng, lat);
+    const label = resolvedPlace.name || await reverseGeocode(AMap, lng, lat) || llmResult.place;
+
+    const loc = {
+        v: 2, captured_at: Date.now(),
+        mode: 'idle', lng, lat, label,
+        poi: llmResult.poi ?? false, nearby,
+    };
+    writeLocationToMessage(lastAiMessage, loc);
+    setChatState(loc);
+    return loc;
+}
+
+async function resolveMoving(AMap, llmResult, lastAiMessage) {
+    const previousPosition = getCurrentPosition();
+    const fromCoords = await resolvePlaceCandidate(AMap, llmResult.from, previousPosition);
+    const toCoords = await resolvePlaceCandidate(AMap, llmResult.to, fromCoords || previousPosition);
+    if (!fromCoords || !toCoords) return null;
+
+    const routeMode = llmResult.route_mode || 'walking';
+    const modeMap = {
+        walking: 'AMap.Walking', driving: 'AMap.Driving',
+        riding: 'AMap.Riding', transfer: 'AMap.Transfer',
+    };
+    const routeCls = AMap[modeMap[routeMode]?.split('.')[1]];
+    if (!routeCls) return null;
+
+    const opts = {};
+    if (routeMode === 'transfer') {
+        const cityRes = await reverseGeocodeComponent(AMap, fromCoords.lng, fromCoords.lat);
+        opts.city = cityRes?.city || cityRes?.province || '全国';
+    }
+    const router = new routeCls(opts);
+    const routeResult = await new Promise((resolve) => {
+        const origin = new AMap.LngLat(fromCoords.lng, fromCoords.lat);
+        const dest = new AMap.LngLat(toCoords.lng, toCoords.lat);
+        router.search(origin, dest, (status, result) => {
+            resolve(status === 'complete' ? result : null);
+        });
+    });
+    if (!routeResult) return null;
+
+    const route = routeMode === 'transfer' ? routeResult.plans?.[0] : routeResult.routes?.[0];
+    if (!route) return null;
+
+    const totalTime = route.time;
+    const totalDist = route.distance;
+    const polyline = extractRoutePolyline(route, routeMode);
+
+    const placeSearch = new AMap.PlaceSearch({ pageSize: 10, pageIndex: 1 });
+    const nearby = await fetchNearbySummary(placeSearch, fromCoords.lng, fromCoords.lat);
+
+    const loc = {
+        v: 2, captured_at: Date.now(),
+        mode: 'moving',
+        from: { lng: fromCoords.lng, lat: fromCoords.lat, label: fromCoords.name || llmResult.from },
+        to: { lng: toCoords.lng, lat: toCoords.lat, label: toCoords.name || llmResult.to },
+        route_mode: routeMode,
+        duration_min: Math.round(totalTime / 60),
+        distance: totalDist,
+        polyline,
+        nearby,
+    };
+    writeLocationToMessage(lastAiMessage, loc);
+    setChatState(loc);
+    return loc;
+}
+
+function extractRoutePolyline(route, mode) {
+    const pts = [];
+    if (mode === 'transfer') {
+        for (const seg of route.segments || []) {
+            const path = seg.transit?.path;
+            if (!path) continue;
+            for (const p of path) {
+                if (typeof p.getLng === 'function') pts.push([p.getLng(), p.getLat()]);
+                else if (typeof p.lng === 'number') pts.push([p.lng, p.lat]);
+            }
+        }
+    } else {
+        for (const step of route.steps || []) {
+            const path = step.path;
+            if (!path) continue;
+            if (typeof path === 'string') {
+                path.split(';').forEach(p => {
+                    const [lng, lat] = p.split(',');
+                    if (lng && lat) pts.push([Number(lng), Number(lat)]);
+                });
+            } else if (Array.isArray(path)) {
+                for (const p of path) {
+                    if (typeof p.getLng === 'function') pts.push([p.getLng(), p.getLat()]);
+                    else if (typeof p.lng === 'number') pts.push([p.lng, p.lat]);
+                    else if (Array.isArray(p)) pts.push([Number(p[0]), Number(p[1])]);
+                }
+            }
+        }
+    }
+    return pts;
+}
+
+async function resolvePlaceCandidate(AMap, query, origin = null) {
+    const ranked = await searchRankedPlaces(AMap, query, { origin });
+    const best = ranked[0];
+    const location = getRankedPoiLocation(best);
+    if (location && best.score >= MIN_INFERENCE_PLACE_SCORE) {
+        return {
+            ...location,
+            name: best.poi?.name || String(query),
+            address: best.poi?.address || '',
+            score: best.score,
+        };
+    }
+
+    const geocoder = new AMap.Geocoder({ city: '全国' });
+    return new Promise((resolve) => {
+        geocoder.getLocation(query, (status, result) => {
+            const geocode = status === 'complete' ? result?.geocodes?.[0] : null;
+            const loc = geocode?.location;
+            resolve(loc ? {
+                lng: loc.getLng(),
+                lat: loc.getLat(),
+                name: geocode.formattedAddress || String(query),
+                address: geocode.formattedAddress || '',
+                score: 0,
+            } : null);
+        });
+    });
+}
+
+async function reverseGeocode(AMap, lng, lat) {
+    return new Promise((resolve) => {
+        const geocoder = new AMap.Geocoder();
+        geocoder.getAddress([lng, lat], (status, result) => {
+            resolve(status === 'complete' ? result?.regeocode?.formattedAddress : null);
+        });
+    });
+}
+
+async function reverseGeocodeComponent(AMap, lng, lat) {
+    return new Promise((resolve) => {
+        const geocoder = new AMap.Geocoder();
+        geocoder.getAddress([lng, lat], (status, result) => {
+            resolve(status === 'complete' ? result?.regeocode?.addressComponent : null);
+        });
+    });
+}
+
+async function fetchNearbySummary(placeSearch, lng, lat) {
+    return new Promise((resolve) => {
+        placeSearch.searchNearBy('', [lng, lat], 500, (status, result) => {
+            if (status !== 'complete' || !result?.poiList?.pois?.length) {
+                resolve('');
+                return;
+            }
+            const pois = result.poiList.pois.slice(0, 5);
+            const summary = pois.map(p => {
+                const d = p.distance < 1000 ? `${Math.round(p.distance)}m` : `${(p.distance/1000).toFixed(1)}km`;
+                const dir = getDirection(lng, lat, p.location);
+                return `${p.name}(${dir}${d})`;
+            }).join('、');
+            resolve(`周边：${summary}`);
+        });
+    });
+}
+
+function getDirection(centerLng, centerLat, loc) {
+    if (!loc) return '';
+    let poiLng, poiLat;
+    if (typeof loc.getLng === 'function') { poiLng = loc.getLng(); poiLat = loc.getLat(); }
+    else { poiLng = loc.lng; poiLat = loc.lat; }
+    const dx = poiLng - centerLng;
+    const dy = poiLat - centerLat;
+    let angle = Math.atan2(dx, dy) * 180 / Math.PI;
+    if (angle < 0) angle += 360;
+    const dirs = ['北','东北','东','东南','南','西南','西','西北'];
+    const idx = Math.round(angle / 45) % 8;
+    return dirs[idx];
+}
+
+function writeLocationToMessage(lastAiMessage, loc) {
+    if (!lastAiMessage?.message) return;
+    if (!lastAiMessage.message.extra) lastAiMessage.message.extra = {};
+    lastAiMessage.message.extra.realmap = loc;
+    if (typeof lastAiMessage.message.swipe_id === 'number') {
+        syncMesToSwipe(lastAiMessage.message, lastAiMessage.message.swipe_id);
+    }
+}
+
+function copyPrevLocation() {
     const last = findLastAiMessage();
     if (!last) return null;
     const loc = last.message?.extra?.realmap;
-    if (loc && (loc.lng !== undefined || (loc.mode === 'idle' && loc.lat !== undefined))) {
+    if (loc && (loc.lng !== undefined || (loc.mode === 'moving' && loc.from))) {
         setChatState(loc);
         return loc;
     }
     return null;
+}
+
+function updateExtensionPrompt() {
+    if (!isExtensionEnabledForChat()) {
+        setExtensionPrompt(REALMAP_INJECT_KEY, '', extension_prompt_types.IN_CHAT, 0);
+        return;
+    }
+    const last = findLastAiMessage();
+    const loc = last?.message?.extra?.realmap;
+    if (!loc || !loc.label) {
+        if (loc?.mode === 'moving' && loc.from?.label) {
+            const parts = [`[现实地图] 当前位置：${loc.from.label}`];
+            if (loc.to?.label) parts.push(`目的地：${loc.to.label}`);
+            if (loc.nearby) parts.push(loc.nearby);
+            setExtensionPrompt(REALMAP_INJECT_KEY, parts.join('\n'), extension_prompt_types.IN_CHAT, 0, false, extension_prompt_roles.SYSTEM);
+            return;
+        }
+        setExtensionPrompt(REALMAP_INJECT_KEY, '', extension_prompt_types.IN_CHAT, 0);
+        return;
+    }
+    const parts = [`[现实地图] 当前位置：${loc.label}`];
+    if (loc.nearby) parts.push(loc.nearby);
+    setExtensionPrompt(REALMAP_INJECT_KEY, parts.join('\n'), extension_prompt_types.IN_CHAT, 0, false, extension_prompt_roles.SYSTEM);
 }

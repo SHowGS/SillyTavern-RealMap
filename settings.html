@@ -14,14 +14,8 @@
                 <div class="menu_button" id="realmap_enable_btn">启用现实地图</div>
             </div>
 
-            <!-- Tab 导航 -->
-            <div class="realmap_tabs flex-container flexGap5">
-                <div class="menu_button realmap_tab" data-tab="api">API 配置</div>
-                <div class="menu_button realmap_tab" data-tab="prompt">提示词配置</div>
-            </div>
-
             <!-- API 配置面板 -->
-            <div class="realmap_tab_panel" data-panel="api">
+            <div>
                 <label for="realmap_key">高德 JS API Key</label>
                 <input id="realmap_key" class="text_pole" type="password" autocomplete="off" placeholder="Web端 (JS API) Key" />
                 <label for="realmap_security_code">安全密钥 (securityJsCode)</label>
@@ -59,41 +53,6 @@
                 </select>
             </div>
 
-            <!-- 提示词配置面板 -->
-            <div class="realmap_tab_panel" data-panel="prompt" style="display:none">
-                <small>编辑位置推断所用的提示词。留空即发送空；点击「恢复默认」可一次性回写所有默认。改动后立即保存。</small>
-
-                <hr>
-
-                <label for="realmap_prompt_system">系统提示词</label>
-                <small>位置推断的主系统提示词。定义 LLM 的角色与任务。</small>
-                <textarea id="realmap_prompt_system" class="text_pole" rows="6" placeholder="你是位置推断助手…"></textarea>
-
-                <label for="realmap_prompt_suffix">追加约束</label>
-                <small>拼在系统提示词之后的额外约束（如风格、语言、禁止行为）。</small>
-                <textarea id="realmap_prompt_suffix" class="text_pole" rows="4" placeholder="例如：一律使用中文地点名；不要解释…"></textarea>
-
-                <label for="realmap_prompt_json_schema">输出 JSON 格式</label>
-                <small>强制 LLM 输出的 JSON 动作结构说明。</small>
-                <textarea id="realmap_prompt_json_schema" class="text_pole" rows="6" placeholder="{ "action": "idle" | "moving" | "null", ... }"></textarea>
-
-                <label for="realmap_prompt_tool_spec">工具说明</label>
-                <small>启用工具调用模式时给 LLM 的工具描述（暂未启用，预留）。</small>
-                <textarea id="realmap_prompt_tool_spec" class="text_pole" rows="6" placeholder="（保留字段）"></textarea>
-
-                <label for="realmap_prompt_fallback">null 时话术</label>
-                <small>推断返回 null 时弹给用户的话术模板，支持 {reason} 占位。</small>
-                <input id="realmap_prompt_fallback" class="text_pole" placeholder="本轮位置推断失败：{reason}" />
-
-                <hr>
-
-                <div class="flex-container flexGap5">
-                    <div class="menu_button" id="realmap_prompt_reset">恢复默认</div>
-                </div>
-            </div>
-
-            <hr>
-            <small class="opacity70p">框架版本 —— 地图交互界面与指令将在后续版本中实现。</small>
         </div>
     </div>
 </div>

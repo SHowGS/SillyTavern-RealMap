@@ -28,16 +28,6 @@ const ROUTE_MODE_ALIASES = Object.freeze({
     transfer: 'transfer',
 });
 
-export function getPreflightSourceFingerprint(value) {
-    const text = String(value ?? '');
-    let hash = 2166136261;
-    for (let index = 0; index < text.length; index += 1) {
-        hash ^= text.charCodeAt(index);
-        hash = Math.imul(hash, 16777619);
-    }
-    return `${text.length}:${(hash >>> 0).toString(16)}`;
-}
-
 export function shouldArmPreflightGeneration({
     type,
     automaticTrigger = false,
@@ -50,12 +40,11 @@ export function shouldArmPreflightGeneration({
         && Boolean(String(userText).trim());
 }
 
-export function shouldRestoreGroupPreflight({
+export function shouldRunFreshPreflightAtStart({
     type,
-    userText = '',
+    groupActive = false,
 } = {}) {
-    return !Boolean(String(userText).trim())
-        && [undefined, null, 'normal', 'regenerate', 'swipe'].includes(type);
+    return !groupActive && ['regenerate', 'swipe'].includes(type);
 }
 
 export class PreflightEventGate {

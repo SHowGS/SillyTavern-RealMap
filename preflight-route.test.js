@@ -5,12 +5,11 @@ import {
     ALL_ROUTE_MODES,
     PreflightEventGate,
     formatPreflightContext,
-    getPreflightSourceFingerprint,
     getRouteModes,
     normalizePreflightIntent,
     queryRouteOptions,
     shouldArmPreflightGeneration,
-    shouldRestoreGroupPreflight,
+    shouldRunFreshPreflightAtStart,
     summarizeRouteResult,
 } from './preflight-route.js';
 
@@ -135,33 +134,25 @@ test('tracks group lifecycle without arming duplicate messages', () => {
     assert.equal(gate.consume(true), false);
     gate.finishGroup();
     assert.equal(gate.groupActive, false);
-
-    assert.equal(shouldRestoreGroupPreflight({
-        type: 'normal',
-        userText: '',
-    }), true);
-    assert.equal(shouldRestoreGroupPreflight({
-        type: 'regenerate',
-        userText: '',
-    }), true);
-    assert.equal(shouldRestoreGroupPreflight({
-        type: 'auto',
-        userText: '',
-    }), false);
-    assert.equal(shouldRestoreGroupPreflight({
-        type: 'quiet',
-        userText: '',
-    }), false);
-    assert.equal(shouldRestoreGroupPreflight({
-        type: 'normal',
-        userText: '新的用户输入',
-    }), false);
 });
 
-test('fingerprints source messages for safe regeneration reuse', () => {
-    const first = getPreflightSourceFingerprint('骑行前往龙潭院区');
-    assert.equal(first, getPreflightSourceFingerprint('骑行前往龙潭院区'));
-    assert.notEqual(first, getPreflightSourceFingerprint('步行前往龙潭院区'));
+test('runs a fresh preflight for regeneration without duplicating group members', () => {
+    assert.equal(shouldRunFreshPreflightAtStart({
+        type: 'regenerate',
+        groupActive: false,
+    }), true);
+    assert.equal(shouldRunFreshPreflightAtStart({
+        type: 'swipe',
+        groupActive: false,
+    }), true);
+    assert.equal(shouldRunFreshPreflightAtStart({
+        type: 'regenerate',
+        groupActive: true,
+    }), false);
+    assert.equal(shouldRunFreshPreflightAtStart({
+        type: 'normal',
+        groupActive: false,
+    }), false);
 });
 
 test('normalizes route intent and restores a missed hospital campus', () => {

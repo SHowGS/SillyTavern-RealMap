@@ -1,6 +1,10 @@
 import { extension_settings, getContext, saveMetadataDebounced } from '../../../extensions.js';
 import { chat_metadata, saveMetadata } from '../../../../script.js';
-import { CHAT_ENABLE_META_KEY, getStoredChatEnableState } from './chat-enable-state.js';
+import {
+    CHAT_ENABLE_META_KEY,
+    getStoredChatEnableState,
+    isChatRuntimeEnabled,
+} from './chat-enable-state.js';
 import { getMovingRoutePosition } from './map-state.js';
 
 export { extension_settings, chat_metadata };
@@ -37,7 +41,7 @@ export function ensureBaseSettings() {
 }
 
 export function isExtensionEnabledForChat() {
-    return getExtensionEnabledStateForChat() === true;
+    return isChatRuntimeEnabled(getExtensionEnabledStateForChat());
 }
 
 export function getExtensionEnabledStateForChat() {

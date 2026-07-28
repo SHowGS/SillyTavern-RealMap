@@ -1,5 +1,13 @@
 import { loadAmap } from './amap.js';
-import { ensureBaseSettings, findLastAiMessage, getChatState, saveWindowPos, loadWindowPos, getCurrentPosition } from './state.js';
+import {
+    ensureBaseSettings,
+    findLastAiMessage,
+    getChatState,
+    saveWindowPos,
+    loadWindowPos,
+    getCurrentPosition,
+    isExtensionEnabledForChat,
+} from './state.js';
 import { openFullscreen } from './fullscreen.js';
 import { createLayerController } from './layer-control.js';
 import { isMobile } from '../../../RossAscends-mods.js';
@@ -36,6 +44,10 @@ export function hideMinimap() {
 }
 
 export function showMinimap() {
+    if (!isExtensionEnabledForChat()) {
+        hideMinimap();
+        return;
+    }
     if (isMobile()) { showFloatingBall(); return; }
     $(`#${WIDGET_ID}`).show();
     if (mapInstance) {
@@ -169,6 +181,10 @@ async function ensureMap() {
 }
 
 export async function refreshMap() {
+    if (!isExtensionEnabledForChat()) {
+        hideMinimap();
+        return;
+    }
     if (isMobile()) return;
     const s = ensureBaseSettings();
     const state = getChatState();
@@ -187,11 +203,12 @@ export async function refreshMap() {
     $hint.hide();
     try {
         const m = await ensureMap();
-        if (!m) {
+        if (!m || !isExtensionEnabledForChat() || getChatState() !== state) {
             refreshPanoramaButton();
             return;
         }
         await renderStateOnMap(m, state);
+        if (!isExtensionEnabledForChat() || getChatState() !== state) return;
     } catch (e) {
         console.error('[realmap] refresh map failed', e);
     }
@@ -408,6 +425,4 @@ export async function initMinimap({ onDisableClick, onRejudge }) {
         e.stopPropagation();
         if (onRejudge) onRejudge();
     });
-    await ensureMap();
-    refreshMap();
 }

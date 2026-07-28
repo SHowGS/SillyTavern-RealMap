@@ -1,5 +1,13 @@
 import { loadAmap } from './amap.js';
-import { ensureBaseSettings, getChatState, findLastAiMessage, setChatState, getVisibleMessages, getCurrentPosition } from './state.js';
+import {
+    ensureBaseSettings,
+    getChatState,
+    findLastAiMessage,
+    setChatState,
+    getVisibleMessages,
+    getCurrentPosition,
+    isExtensionEnabledForChat,
+} from './state.js';
 import { getContext } from '../../../extensions.js';
 import { Popup, POPUP_RESULT } from '../../../popup.js';
 import { createLayerController } from './layer-control.js';
@@ -26,6 +34,16 @@ let previewDest = null;
 let sliderEl = null;
 let previewPolylines = [];
 let transferPanelEl = null;
+let closeFullscreenHandler = null;
+let fullscreenChat = null;
+let fullscreenClosing = false;
+
+function isFullscreenRuntimeActive() {
+    return Boolean(fsHostEl)
+        && !fullscreenClosing
+        && isExtensionEnabledForChat()
+        && getContext()?.chat === fullscreenChat;
+}
 
 async function ensureFsMap() {
     if (fsMap) return fsMap;
@@ -137,6 +155,7 @@ function resolvePolicy(mode, pos) {
 }
 
 async function showRoutePreview(mode, destLng, destLat, policy = null) {
+    if (!isFullscreenRuntimeActive()) return;
     const origin = getCurrentPosition();
     if (!origin) {
         window.toastr?.warning('无当前位置，无法预览路线。');
@@ -182,12 +201,14 @@ async function showRoutePreview(mode, destLng, destLat, policy = null) {
         } catch (_) {
             opts.city = '全国';
         }
+        if (!isFullscreenRuntimeActive()) return;
     }
 
     previewPlugin = new m.cls(opts);
     const originLngLat = mode === 'transfer' ? new AMap.LngLat(origin.lng, origin.lat) : [origin.lng, origin.lat];
     const destLngLat = mode === 'transfer' ? new AMap.LngLat(destLng, destLat) : [destLng, destLat];
     previewPlugin.search(originLngLat, destLngLat, (status, result) => {
+        if (!isFullscreenRuntimeActive()) return;
         if (status !== 'complete') {
             window.toastr?.warning(`${m.label}：无可用路线。`);
             clearRoutePreview();
@@ -515,6 +536,7 @@ function placeSelectionMarker(lng, lat) {
 }
 
 function openActionMenu(lng, lat) {
+    if (!isFullscreenRuntimeActive()) return;
     const AMap = window.AMap;
     const menu = $('<div style="display:flex;flex-direction:column;background:rgba(0,0,0,0.8);color:#fff;min-width:120px;border-radius:4px"></div>');
     const placeholder = $('<div style="padding:6px;color:#aaa;font-size:12px;white-space:nowrap">（正在获取地名…）</div>');
@@ -522,6 +544,7 @@ function openActionMenu(lng, lat) {
     let placeName = '';
     const geocoder = new AMap.Geocoder();
     geocoder.getAddress([lng, lat], (status, result) => {
+        if (!isFullscreenRuntimeActive()) return;
         placeName = result?.regeocode?.formattedAddress || `坐标 ${lng.toFixed(4)},${lat.toFixed(4)}`;
         placeholder.replaceWith(`<div style="padding:6px;font-size:12px;color:#aaa;white-space:nowrap">${placeName}</div>`);
         addMenuActions(menu, lng, lat, placeName);
@@ -619,11 +642,13 @@ async function confirmOverwriteLocation() {
 }
 
 async function overwriteCurrentUserLocation(lng, lat, label) {
+    if (!isFullscreenRuntimeActive()) return;
     const last = findLastAiMessage();
     if (!last) {
         window.toastr?.warning('未找到可写入的 AI 消息。');
         return;
     }
+    if (!isFullscreenRuntimeActive()) return;
     const m = last.message;
     if (!m.extra) m.extra = {};
     m.extra.realmap = {
@@ -644,6 +669,7 @@ async function overwriteCurrentUserLocation(lng, lat, label) {
 
 function bindMapClick(map, AMap) {
     map.on('click', (e) => {
+        if (!isFullscreenRuntimeActive()) return;
         const lng = e.lnglat.getLng();
         const lat = e.lnglat.getLat();
         const hasSelection = fsMap.getAllOverlays('marker').some(
@@ -658,12 +684,14 @@ function bindMapClick(map, AMap) {
         }
     });
     map.on('rightclick', (e) => {
+        if (!isFullscreenRuntimeActive()) return;
         if (isMobile()) return;
         clearSelectionMarker();
         window.__realmap_info?.close();
         window.__realmap_info = null;
     });
     map.on('moveend', () => {
+        if (!isFullscreenRuntimeActive()) return;
         if (previewPlugin) return;  // 路线预览状态下不触发
         const sel = fsMap.getAllOverlays('marker').find(
             o => o.getExtData?.()?.realmap === 'selection'
@@ -690,6 +718,7 @@ function bindSearch() {
     let timer = null;
 
     const renderPois = (ranked, origin) => {
+        if (!isFullscreenRuntimeActive()) return;
         listEl.innerHTML = '';
         ranked.forEach((candidate) => {
             const { poi: p, distance } = candidate;
@@ -723,11 +752,13 @@ function bindSearch() {
         const q = input.value.trim();
         if (!q) { listEl.innerHTML = ''; listEl.style.display = 'none'; return; }
         timer = setTimeout(async () => {
+            if (!isFullscreenRuntimeActive()) return;
             const origin = getCurrentPosition() || (fsMap ? (() => {
                 const c = fsMap.getCenter();
                 return { lng: c.getLng(), lat: c.getLat() };
             })() : null);
             const ranked = await searchRankedPlaces(AMap, q, { origin });
+            if (!isFullscreenRuntimeActive() || input.value.trim() !== q) return;
             if (!ranked.length) {
                 listEl.innerHTML = '<div class="realmap_search_empty">无结果</div>';
                 listEl.style.display = 'flex';
@@ -782,17 +813,27 @@ function drawFromState(state) {
 }
 
 export async function openFullscreen(opts) {
+    if (!isExtensionEnabledForChat() || fsHostEl) return;
     runtime = opts;
     ctx_ = getContext();
+    const chat = ctx_?.chat;
     const s = ensureBaseSettings();
     const AMap = await loadAmap(s.key, s.securityCode);
+    if (!isExtensionEnabledForChat() || getContext()?.chat !== chat) return;
 
     // 直接把全屏地图挂到 body 上，并用浏览器 Fullscreen API 真全屏
     const $host = $(buildFullscreenHtml());
     $('body').append($host);
     fsHostEl = $host[0];
+    fullscreenChat = chat;
+    fullscreenClosing = false;
 
+    let closed = false;
+    let disableAfterClose = false;
+    let requestClose = null;
     const exitFullscreen = () => {
+        const shouldOpenDisablePrompt = disableAfterClose;
+        disableAfterClose = false;
         clearRoutePreviewFull();
         try { if (fsMap) fsMap.destroy(); } catch (_) {}
         fsMap = null;
@@ -802,11 +843,29 @@ export async function openFullscreen(opts) {
         $host.remove();
         fsHostEl = null;
         fsOpen = false;
+        fullscreenChat = null;
+        fullscreenClosing = false;
+        if (closeFullscreenHandler === requestClose) closeFullscreenHandler = null;
         document.removeEventListener('fullscreenchange', onFsChange);
         document.removeEventListener('keydown', onKey);
         if (opts.afterClose) opts.afterClose();
+        if (shouldOpenDisablePrompt && opts.onDisableClick) {
+            void Promise.resolve(opts.onDisableClick()).catch(error => {
+                console.warn('[realmap] failed to open disable confirmation', error);
+            });
+        }
     };
-    let closed = false;
+    requestClose = () => {
+        if (closed) return;
+        closed = true;
+        fullscreenClosing = true;
+        if (document.fullscreenElement) {
+            document.exitFullscreen().then(exitFullscreen).catch(exitFullscreen);
+        } else {
+            exitFullscreen();
+        }
+    };
+    closeFullscreenHandler = requestClose;
     const onFsChange = () => {
         if (document.fullscreenElement == null && !closed) {
             closed = true;
@@ -814,14 +873,7 @@ export async function openFullscreen(opts) {
         }
     };
     const onKey = (e) => {
-        if (e.key === 'Escape' && !closed) {
-            closed = true;
-            if (document.fullscreenElement) {
-                document.exitFullscreen().catch(() => exitFullscreen());
-            } else {
-                exitFullscreen();
-            }
-        }
+        if (e.key === 'Escape') requestClose();
     };
     // 给所有 UI 覆盖层拦截 click，防止下传到地图层触发 marker
     $host.find('.realmap_fs_close_ctl, .realmap_fs_layer_ctl, .realmap_fs_zoom_ctl, .realmap_search, .realmap_panorama_btn, #realmap_route_slider, #realmap_transfer_panel, .realmap_fs_disable_ctl')
@@ -830,7 +882,10 @@ export async function openFullscreen(opts) {
     // 移动端禁用 + 重新判断按钮
     if (isMobile() && opts.onDisableClick) {
         $host.find('.realmap_fs_disable_ctl').show();
-        $host.find('#realmap_fs_disable_btn').on('click', () => opts.onDisableClick());
+        $host.find('#realmap_fs_disable_btn').on('click', () => {
+            disableAfterClose = true;
+            requestClose();
+        });
     }
     if (isMobile() && opts.onRejudge) {
         $host.find('#realmap_fs_rejudge_btn').show();
@@ -846,13 +901,7 @@ export async function openFullscreen(opts) {
     });
 
     $host.find('#realmap_fs_close').on('click', () => {
-        if (closed) return;
-        closed = true;
-        if (document.fullscreenElement) {
-            document.exitFullscreen().then(exitFullscreen).catch(exitFullscreen);
-        } else {
-            exitFullscreen();
-        }
+        requestClose();
     });
 
     try {
@@ -860,17 +909,33 @@ export async function openFullscreen(opts) {
     } catch (_) {
         // 降级：没拿到真全屏也能用，元素本身已全屏铺开
     }
+    if (closed || !isExtensionEnabledForChat() || getContext()?.chat !== chat) {
+        requestClose();
+        return;
+    }
     document.addEventListener('fullscreenchange', onFsChange);
     document.addEventListener('keydown', onKey);
 
     await new Promise(r => requestAnimationFrame(r));
+    if (closed || !isExtensionEnabledForChat() || getContext()?.chat !== chat) {
+        requestClose();
+        return;
+    }
     bindZoom();
     bindSearch();
     await ensureFsMap();
+    if (closed || !isExtensionEnabledForChat() || getContext()?.chat !== chat) {
+        requestClose();
+        return;
+    }
     drawFromState(opts.getState());
     const panoOk = !!getCurrentPosition();
     $host.find('#realmap_fs_panorama_btn').toggleClass('disabled', !panoOk);
     fsOpen = true;
+}
+
+export function closeFullscreen() {
+    closeFullscreenHandler?.();
 }
 
 export function isFullscreenOpen() {

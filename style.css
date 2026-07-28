@@ -46,6 +46,15 @@
     box-shadow: 0 0 8px rgba(50, 205, 50, 0.45);
 }
 
+#realmap_update_btn.realmap_update_current {
+    color: #8a8a8a;
+    border-color: #777;
+    background-color: rgba(128, 128, 128, 0.12);
+    box-shadow: none;
+    opacity: 0.72;
+    cursor: default;
+}
+
 #realmap_enable_btn {
     writing-mode: horizontal-tb;
     word-break: keep-all;

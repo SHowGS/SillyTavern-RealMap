@@ -40,6 +40,7 @@ import {
     queryRouteOptions,
     shouldRestoreGroupPreflight,
 } from './preflight-route.js';
+import { formatVersionLabel, getUpdateButtonPresentation } from './version-state.js';
 
 const MODULE_NAME = 'realmap';
 const EXTENSION_MANIFEST_ID = 'third-party/SillyTavern-RealMap';
@@ -267,12 +268,21 @@ async function getManifestVersion() {
     }
 }
 
-function setUpdateButtonState({ available = false, disabled = false, title = '' } = {}) {
+function setUpdateButtonState({
+    available = false,
+    current = false,
+    disabled = false,
+    title = '',
+    text = '更新',
+} = {}) {
     const button = $('#realmap_update_btn');
     button
         .toggleClass('realmap_update_available', available)
+        .toggleClass('realmap_update_current', current)
         .prop('disabled', disabled)
-        .attr('title', title || (available ? '发现新版本，点击更新' : '检查并更新现实地图'));
+        .attr('title', title || (available ? '发现新版本，点击更新' : '检查并更新现实地图'))
+        .find('span')
+        .text(text);
 }
 
 function isGlobalExtension() {
@@ -288,7 +298,7 @@ async function checkRealMapVersion() {
     if (!versionElement) return;
 
     versionElement.textContent = '正在检查...';
-    setUpdateButtonState({ disabled: true });
+    setUpdateButtonState({ disabled: true, text: '检查中...' });
     const manifestVersionPromise = getManifestVersion();
 
     try {
@@ -311,25 +321,14 @@ async function checkRealMapVersion() {
             throw new Error('版本接口返回了无效状态');
         }
         const manifestVersion = await manifestVersionPromise;
-        const versionParts = [];
-        if (manifestVersion) {
-            versionParts.push(`v${manifestVersion}`);
-        }
-        if (data.currentBranchName && data.currentCommitHash) {
-            versionParts.push(`${data.currentBranchName}-${String(data.currentCommitHash).slice(0, 7)}`);
-        }
-
         const hasUpdate = data.isUpToDate === false;
         const canUpdate = canUpdateExtension();
-        versionParts.push(hasUpdate
-            ? (canUpdate ? '有新版本' : '有新版本（需要管理员更新）')
-            : '已是最新版');
-        versionElement.textContent = versionParts.join(' · ');
-        setUpdateButtonState({
-            available: hasUpdate,
-            disabled: !canUpdate,
-            title: !canUpdate ? '全局扩展只能由管理员更新' : '',
-        });
+        versionElement.textContent = formatVersionLabel({
+            manifestVersion,
+            branchName: data.currentBranchName,
+            commitHash: data.currentCommitHash,
+        }) || '版本未知';
+        setUpdateButtonState(getUpdateButtonPresentation({ hasUpdate, canUpdate }));
     } catch (error) {
         const manifestVersion = await manifestVersionPromise;
         versionElement.textContent = manifestVersion
@@ -339,6 +338,7 @@ async function checkRealMapVersion() {
         setUpdateButtonState({
             disabled: !canUpdate,
             title: !canUpdate ? '全局扩展只能由管理员更新' : '',
+            text: '更新',
         });
         console.warn('[realmap] version check failed', error);
     }
@@ -354,7 +354,7 @@ async function updateRealMapExtension() {
     extensionUpdateInProgress = true;
     const button = $('#realmap_update_btn');
     const icon = button.find('i');
-    button.prop('disabled', true);
+    setUpdateButtonState({ disabled: true, text: '更新中...' });
     icon.removeClass('fa-download').addClass('fa-spinner fa-spin');
 
     try {
@@ -389,7 +389,6 @@ async function updateRealMapExtension() {
     } finally {
         extensionUpdateInProgress = false;
         icon.removeClass('fa-spinner fa-spin').addClass('fa-download');
-        button.prop('disabled', !canUpdateExtension());
     }
 }
 

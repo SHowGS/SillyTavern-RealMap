@@ -12,6 +12,7 @@ import {
     parseLlmResponsePayload,
     stringifyLlmResponse,
 } from './llm-response.js';
+import { readLatestPluginLlmLog, writeLatestPluginLlmLog } from './llm-log-cache.js';
 import {
     getMovingProgress,
     getMovingRoutePosition,
@@ -63,6 +64,7 @@ let postflightAbortController = null;
 let postflightRunId = 0;
 let extensionUpdateInProgress = false;
 const preflightLlmDebugByMessage = new WeakMap();
+let latestPluginLlmLogInMemory = null;
 
 /**
  * @typedef {Object} RealMapSettings
@@ -285,6 +287,61 @@ function setUpdateButtonState({
         .text(text);
 }
 
+function getPluginLlmLogStorage() {
+    try {
+        return window.sessionStorage;
+    } catch (_) {
+        return null;
+    }
+}
+
+function cacheLatestPluginLlmLog(reports) {
+    try {
+        latestPluginLlmLogInMemory = writeLatestPluginLlmLog(
+            getPluginLlmLogStorage(),
+            reports,
+        );
+    } catch (error) {
+        latestPluginLlmLogInMemory = {
+            v: 1,
+            captured_at: Date.now(),
+            text: combineLlmDebugReports(reports),
+        };
+        console.warn('[realmap] failed to cache plugin LLM log in browser', error);
+    }
+}
+
+function getLatestPluginLlmLog() {
+    try {
+        return latestPluginLlmLogInMemory
+            || readLatestPluginLlmLog(getPluginLlmLogStorage());
+    } catch (_) {
+        return latestPluginLlmLogInMemory;
+    }
+}
+
+function showPluginLlmLogPopup() {
+    const log = getLatestPluginLlmLog();
+    const timestamp = Number.isFinite(Number(log?.captured_at))
+        ? new Date(Number(log.captured_at)).toLocaleString()
+        : '';
+    const text = log?.text
+        ? `${timestamp ? `记录时间：${timestamp}\n\n` : ''}${log.text}`
+        : '暂无插件LLM调用日志。';
+    const escapeHtml = value => String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    const html = `<pre style="white-space:pre-wrap;font-size:12px;max-height:60vh;overflow-y:auto;color:var(--SmartThemeBodyColor);background:rgba(0,0,0,0.3);padding:12px;border-radius:4px">${escapeHtml(text)}</pre>`;
+    const popup = new Popup(html, POPUP_TYPE.DISPLAY, '', {
+        wide: true,
+        large: true,
+        okButton: '关闭',
+        cancelButton: false,
+    });
+    popup.show();
+}
+
 function isGlobalExtension() {
     return extensionTypes[EXTENSION_MANIFEST_ID] === 'global';
 }
@@ -429,6 +486,7 @@ function bindSettings() {
     });
     $('#realmap_llm_refresh_models').on('click', () => void refreshLlmModels());
     $('#realmap_update_btn').on('click', () => void updateRealMapExtension());
+    $('#realmap_log_btn').on('click', showPluginLlmLogPopup);
     toggleLlmCustomUrl();
 
 }
@@ -737,7 +795,10 @@ async function runPreflightForUserMessage(ctx, chat, message) {
         timeoutMs: Math.max(0, deadline - Date.now()),
         abortController: runController,
         debugLabel: '正文前信息补充LLM',
-        onDebugReport: report => preflightLlmDebugByMessage.set(message, report),
+        onDebugReport: report => {
+            preflightLlmDebugByMessage.set(message, report);
+            cacheLatestPluginLlmLog([report]);
+        },
     });
     if (runId !== preflightRunId || getContext()?.chat !== chat) return;
 
@@ -1031,11 +1092,15 @@ async function inferLocationFromVisible() {
         const preflightDebugReport = preflightLlmDebugByMessage.get(roundContext.curUserMes) || '';
         const rawResult = await callPluginLlm(s, messages, {
             maxTokens: PLUGIN_LLM_MAX_TOKENS,
+            showDebug: false,
             manageUi: false,
             registerExternalAbort: false,
             abortController: controller,
             debugLabel: '输出后位置推断LLM',
-            prependDebugReports: [preflightDebugReport],
+            onDebugReport: report => cacheLatestPluginLlmLog([
+                preflightDebugReport,
+                report,
+            ]),
         });
         if (controller.signal.aborted
             || runId !== postflightRunId
@@ -1124,7 +1189,7 @@ function getNarrativeElapsedMinutes(result) {
 
 async function callPluginLlm(s, messages, {
     maxTokens = PLUGIN_LLM_MAX_TOKENS,
-    showDebug = true,
+    showDebug = false,
     manageUi = true,
     timeoutMs = null,
     registerExternalAbort = manageUi,
@@ -1292,10 +1357,7 @@ async function callPluginLlm(s, messages, {
 
     if (showDebug && !aborted) {
         const debugText = combineLlmDebugReports(prependDebugReports, currentDebugReport);
-        const escapeHtml = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        const debugHtml = `<pre style="white-space:pre-wrap;font-size:12px;max-height:60vh;overflow-y:auto;color:var(--SmartThemeBodyColor);background:rgba(0,0,0,0.3);padding:12px;border-radius:4px">${escapeHtml(debugText)}</pre>`;
-        const popup = new Popup(debugHtml, POPUP_TYPE.DISPLAY, '', { wide: true, large: true, okButton: '关闭', cancelButton: false });
-        popup.show();
+        cacheLatestPluginLlmLog([debugText]);
     }
 
     return result;

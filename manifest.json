@@ -1,1 +1,1 @@
-{"display_name":"现实地图","loading_order":100,"requires":[],"optional":[],"js":"index.js","css":"style.css","author":"SHowGS","version":"1.0.1","homePage":"https://github.com/SHowGS/SillyTavern-RealMap","minimum_client_version":"1.12.0","hooks":{"activate":"init"}}
+{"display_name":"现实地图","loading_order":100,"requires":[],"optional":[],"js":"index.js","css":"style.css","author":"SHowGS","version":"1.0.2","homePage":"https://github.com/SHowGS/SillyTavern-RealMap","minimum_client_version":"1.12.0","hooks":{"activate":"init"}}

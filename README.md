@@ -200,7 +200,7 @@ git clone https://github.com/SHowGS/SillyTavern-RealMap.git
 - 地图搜索、地理编码、周边POI和路线请求会发送到高德地图服务。
 - “前往此处”仅填写输入框，不会自动发送消息。
 - “设置此地为当前位置”会在确认后修改最近一条AI消息的`extra.realmap`。
-- AI回复后会显示合并调试弹窗，依次包含正文前信息补充LLM和输出后位置推断LLM的请求消息、65536tokens输出上限、HTTP状态、请求ID、响应模型、`finish_reason`、`usage`、完整API响应、LLM原始输出和JSON解析结果。
+- 正文输出后不会自动显示调试弹窗。最近一轮正文前信息补充LLM和输出后位置推断LLM的请求消息、65536tokens输出上限、HTTP状态、请求ID、响应模型、`finish_reason`、`usage`、完整API响应、LLM原始输出和JSON解析结果会缓存在当前浏览器标签页；点击配置页“日志”按钮后统一显示，关闭标签页后自动清除。
 
 ## 要求
 

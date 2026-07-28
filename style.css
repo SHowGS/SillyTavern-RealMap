@@ -6,8 +6,44 @@
 
 #realmap_enable_btn,
 #realmap_test_connection,
-#realmap_llm_refresh_models {
+#realmap_llm_refresh_models,
+#realmap_update_btn {
     white-space: nowrap;
+}
+
+.realmap_version_row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.realmap_version_info {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+}
+
+#realmap_version_value {
+    font-size: 0.85em;
+    opacity: 0.8;
+    overflow-wrap: anywhere;
+}
+
+#realmap_update_btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+    transition: color 0.2s ease, border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+#realmap_update_btn.realmap_update_available {
+    color: limegreen;
+    border-color: limegreen;
+    background-color: rgba(50, 205, 50, 0.18);
+    box-shadow: 0 0 8px rgba(50, 205, 50, 0.45);
 }
 
 #realmap_enable_btn {

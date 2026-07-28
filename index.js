@@ -1,21 +1,67 @@
-import { extension_settings, renderExtensionTemplateAsync, getContext } from '../../../extensions.js';
-import { saveSettingsDebounced, eventSource, event_types, chat_metadata, setExtensionPrompt, extension_prompt_types, extension_prompt_roles, setExternalAbortController, deactivateSendButtons, activateSendButtons } from '../../../../script.js';
+import { extension_settings, extensionTypes, renderExtensionTemplateAsync, getContext } from '../../../extensions.js';
+import { saveSettingsDebounced, eventSource, event_types, chat_metadata, setExtensionPrompt, extension_prompt_types, extension_prompt_roles, setExternalAbortController, deactivateSendButtons, activateSendButtons, getRequestHeaders } from '../../../../script.js';
 import { t } from '../../../i18n.js';
 import { Popup, POPUP_RESULT, POPUP_TYPE } from '../../../popup.js';
+import { isAdmin } from '../../../user.js';
+import { getRegexedString, regex_placement } from '../../regex/engine.js';
 import { resetAmapCache } from './amap.js';
-import { setExtensionEnabledForChat, isExtensionEnabledForChat, findLastAiMessage, getVisibleMessages, clearAllChatLocations, setChatState, getChatState, syncMesToSwipe, getCurrentPosition } from './state.js';
+import {
+    PLUGIN_LLM_MAX_TOKENS,
+    combineLlmDebugReports,
+    extractJsonObject,
+    parseLlmResponsePayload,
+    stringifyLlmResponse,
+} from './llm-response.js';
+import {
+    getMovingProgress,
+    getMovingRoutePosition,
+    getPointAlongRoute,
+    placeLabelsReferToSameLocation,
+    projectPointToRoute,
+} from './map-state.js';
+import { setExtensionEnabledForChat, isExtensionEnabledForChat, getExtensionEnabledStateForChat, findLastAiMessage, getVisibleMessages, clearAllChatLocations, setChatState, getChatState, syncMesToSwipe, getCurrentPosition } from './state.js';
 import { initMinimap, showMinimap, hideMinimap, refreshMap } from './minimap.js';
-import { DEFAULT_SYSTEM_PROMPT, DEFAULT_ASSISTANT_REPLY, DEFAULT_ASSISTANT_PREFILL, renderContextPrompt } from './prompts.js';
-import { searchRankedPlaces, getRankedPoiLocation } from './place-search.js';
+import {
+    DEFAULT_SYSTEM_PROMPT,
+    DEFAULT_ASSISTANT_REPLY,
+    PREFLIGHT_SYSTEM_PROMPT,
+    PREFLIGHT_ASSISTANT_REPLY,
+    formatPluginLocation,
+    renderContextPrompt,
+    renderPreflightPrompt,
+} from './prompts.js';
+import { searchRankedPlaces, getRankedPoiLocation, normalizePlaceIntent, refinePlaceIntentFromNarrative, resolveNarrativePlace } from './place-search.js';
+import {
+    PREFLIGHT_TOTAL_TIMEOUT_MS,
+    PreflightEventGate,
+    formatPreflightContext,
+    getPreflightSourceFingerprint,
+    normalizePreflightIntent,
+    queryRouteOptions,
+    shouldRestoreGroupPreflight,
+} from './preflight-route.js';
 
 const MODULE_NAME = 'realmap';
+const EXTENSION_MANIFEST_ID = 'third-party/SillyTavern-RealMap';
+const EXTENSION_API_ID = '/SillyTavern-RealMap';
 const LOADER_URL = 'https://webapi.amap.com/loader.js';
 const REALMAP_INJECT_KEY = 'realmapLocationContext';
+const REALMAP_PREFLIGHT_INJECT_KEY = 'realmapPreflightContext';
 const MIN_INFERENCE_PLACE_SCORE = 80;
+const VERSION_CHECK_TIMEOUT_MS = 60_000;
+const EXTENSION_UPDATE_TIMEOUT_MS = 120_000;
+const PLUGIN_CALL_CANCELLED = Symbol('realmapPluginCallCancelled');
 
 let chatChangedTimer = null;
 let chatChangedRunning = false;
 let llmAbortController = null;
+let preflightAbortController = null;
+let preflightRunId = 0;
+const preflightEventGate = new PreflightEventGate();
+let postflightAbortController = null;
+let postflightRunId = 0;
+let extensionUpdateInProgress = false;
+const preflightLlmDebugByMessage = new WeakMap();
 
 /**
  * @typedef {Object} RealMapSettings
@@ -207,6 +253,146 @@ async function testConnection() {
     }
 }
 
+async function getManifestVersion() {
+    try {
+        const response = await fetch(new URL('./manifest.json', import.meta.url), { cache: 'no-store' });
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const manifest = await response.json();
+        return typeof manifest?.version === 'string' ? manifest.version : '';
+    } catch (error) {
+        console.warn('[realmap] failed to read manifest version', error);
+        return '';
+    }
+}
+
+function setUpdateButtonState({ available = false, disabled = false, title = '' } = {}) {
+    const button = $('#realmap_update_btn');
+    button
+        .toggleClass('realmap_update_available', available)
+        .prop('disabled', disabled)
+        .attr('title', title || (available ? '发现新版本，点击更新' : '检查并更新现实地图'));
+}
+
+function isGlobalExtension() {
+    return extensionTypes[EXTENSION_MANIFEST_ID] === 'global';
+}
+
+function canUpdateExtension() {
+    return !isGlobalExtension() || isAdmin();
+}
+
+async function checkRealMapVersion() {
+    const versionElement = document.getElementById('realmap_version_value');
+    if (!versionElement) return;
+
+    versionElement.textContent = '正在检查...';
+    setUpdateButtonState({ disabled: true });
+    const manifestVersionPromise = getManifestVersion();
+
+    try {
+        const response = await fetch('/api/extensions/version', {
+            method: 'POST',
+            signal: AbortSignal.timeout(VERSION_CHECK_TIMEOUT_MS),
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                extensionName: EXTENSION_API_ID,
+                global: isGlobalExtension(),
+            }),
+        });
+        if (!response.ok) {
+            const message = await response.text();
+            throw new Error(message || `HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (typeof data.isUpToDate !== 'boolean') {
+            throw new Error('版本接口返回了无效状态');
+        }
+        const manifestVersion = await manifestVersionPromise;
+        const versionParts = [];
+        if (manifestVersion) {
+            versionParts.push(`v${manifestVersion}`);
+        }
+        if (data.currentBranchName && data.currentCommitHash) {
+            versionParts.push(`${data.currentBranchName}-${String(data.currentCommitHash).slice(0, 7)}`);
+        }
+
+        const hasUpdate = data.isUpToDate === false;
+        const canUpdate = canUpdateExtension();
+        versionParts.push(hasUpdate
+            ? (canUpdate ? '有新版本' : '有新版本（需要管理员更新）')
+            : '已是最新版');
+        versionElement.textContent = versionParts.join(' · ');
+        setUpdateButtonState({
+            available: hasUpdate,
+            disabled: !canUpdate,
+            title: !canUpdate ? '全局扩展只能由管理员更新' : '',
+        });
+    } catch (error) {
+        const manifestVersion = await manifestVersionPromise;
+        versionElement.textContent = manifestVersion
+            ? `v${manifestVersion} · 检查更新失败`
+            : '检查更新失败';
+        const canUpdate = canUpdateExtension();
+        setUpdateButtonState({
+            disabled: !canUpdate,
+            title: !canUpdate ? '全局扩展只能由管理员更新' : '',
+        });
+        console.warn('[realmap] version check failed', error);
+    }
+}
+
+async function updateRealMapExtension() {
+    if (extensionUpdateInProgress) return;
+    if (!canUpdateExtension()) {
+        toastr.error(t`全局扩展只能由管理员更新。`);
+        return;
+    }
+
+    extensionUpdateInProgress = true;
+    const button = $('#realmap_update_btn');
+    const icon = button.find('i');
+    button.prop('disabled', true);
+    icon.removeClass('fa-download').addClass('fa-spinner fa-spin');
+
+    try {
+        const response = await fetch('/api/extensions/update', {
+            method: 'POST',
+            signal: AbortSignal.timeout(EXTENSION_UPDATE_TIMEOUT_MS),
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                extensionName: EXTENSION_API_ID,
+                global: isGlobalExtension(),
+            }),
+        });
+        if (!response.ok) {
+            const message = await response.text();
+            throw new Error(message || `HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (typeof data.isUpToDate !== 'boolean') {
+            throw new Error('更新接口返回了无效状态');
+        }
+        if (data.isUpToDate) {
+            toastr.success(t`现实地图已是最新版。`);
+        } else {
+            const commit = data.shortCommitHash ? `（${data.shortCommitHash}）` : '';
+            toastr.success(t`现实地图已更新${commit}，请刷新页面以应用更新。`);
+        }
+        await checkRealMapVersion();
+    } catch (error) {
+        console.error('[realmap] extension update failed', error);
+        toastr.error(t`现实地图更新失败：${error.message}`);
+    } finally {
+        extensionUpdateInProgress = false;
+        icon.removeClass('fa-spinner fa-spin').addClass('fa-download');
+        button.prop('disabled', !canUpdateExtension());
+    }
+}
+
 function bindSettings() {
     const s = ensureSettings();
     $('#realmap_key').val(s.key).on('input', function () {
@@ -243,6 +429,7 @@ function bindSettings() {
         saveSettingsDebounced();
     });
     $('#realmap_llm_refresh_models').on('click', () => void refreshLlmModels());
+    $('#realmap_update_btn').on('click', () => void updateRealMapExtension());
     toggleLlmCustomUrl();
 
 }
@@ -255,15 +442,385 @@ export async function init() {
     const settingsHtml = await renderExtensionTemplateAsync('third-party/SillyTavern-RealMap', 'settings');
     $('#extensions_settings').append(settingsHtml);
     bindSettings();
+    void checkRealMapVersion();
     injectMinimapHtml();
     await initMinimap({ onDisableClick: handleDisableClick, onRejudge: handleRejudge });
+    eventSource.on(event_types.GENERATION_STARTED, onPreflightGenerationStarted);
+    eventSource.on(event_types.GENERATION_AFTER_COMMANDS, onPreflightGenerationAfterCommands);
+    eventSource.on(event_types.MESSAGE_SENT, onPreflightMessageSent);
+    eventSource.on(event_types.GENERATION_ENDED, onPreflightGenerationEnded);
+    eventSource.on(event_types.GENERATION_STOPPED, onPreflightGenerationStopped);
+    eventSource.on(event_types.GROUP_WRAPPER_STARTED, onPreflightGroupStarted);
+    eventSource.on(event_types.GROUP_WRAPPER_FINISHED, onPreflightGroupFinished);
+    eventSource.on(event_types.CHAT_CHANGED, onPreflightChatChanged);
     eventSource.on(event_types.CHAT_CHANGED, debouncedOnChatChanged);
     eventSource.on(event_types.MESSAGE_DELETED, debouncedOnChatChanged);
     eventSource.on(event_types.MESSAGE_EDITED, debouncedOnChatChanged);
-    eventSource.makeLast(event_types.CHARACTER_MESSAGE_RENDERED, (messageId) => void onAiMessage(messageId));
+    eventSource.makeLast(event_types.CHARACTER_MESSAGE_RENDERED, onAiMessage);
     onChatChanged();
     $('#realmap_enable_btn').on('click', () => void handleEnableFromSettings());
     console.debug('[realmap] initialized');
+}
+
+function clearPreflightInjection() {
+    setExtensionPrompt(
+        REALMAP_PREFLIGHT_INJECT_KEY,
+        '',
+        extension_prompt_types.IN_CHAT,
+        0,
+        false,
+        extension_prompt_roles.SYSTEM,
+    );
+}
+
+function cancelPreflightWork({ clearInjection = true, disarm = true } = {}) {
+    preflightRunId += 1;
+    if (preflightAbortController) {
+        preflightAbortController.abort();
+        preflightAbortController = null;
+    }
+    if (disarm) preflightEventGate.disarm();
+    if (clearInjection) clearPreflightInjection();
+}
+
+function cancelPostflightWork({ detach = false } = {}) {
+    postflightRunId += 1;
+    const controller = postflightAbortController;
+    if (controller && !controller.signal.aborted) controller.abort();
+    if (detach && postflightAbortController === controller) {
+        postflightAbortController = null;
+    }
+}
+
+function cancelAllPluginWork({ detachPostflight = false } = {}) {
+    cancelPreflightWork();
+    cancelPostflightWork({ detach: detachPostflight });
+    if (llmAbortController && !llmAbortController.signal.aborted) {
+        llmAbortController.abort();
+    }
+}
+
+function setPreflightInjection(metadata) {
+    const context = formatPreflightContext(metadata);
+    setExtensionPrompt(
+        REALMAP_PREFLIGHT_INJECT_KEY,
+        context,
+        extension_prompt_types.IN_CHAT,
+        0,
+        false,
+        extension_prompt_roles.SYSTEM,
+    );
+    return context;
+}
+
+function getLatestUserPreflight() {
+    const chat = getContext()?.chat;
+    if (!Array.isArray(chat)) return null;
+    const message = [...chat].reverse().find(item => item?.is_user && !item?.is_system);
+    const metadata = message?.extra?.realmap_preflight;
+    const sourceMatches = metadata?.source_fingerprint
+        === getPreflightSourceFingerprint(message?.mes);
+    return metadata?.v === 1 && sourceMatches && Array.isArray(metadata.routes)
+        ? metadata
+        : null;
+}
+
+function onPreflightGenerationStarted(type, _params, dryRun) {
+    if (dryRun) return;
+    cancelPostflightWork({ detach: true });
+    const isReuseGeneration = type === 'regenerate' || type === 'swipe';
+    if (isReuseGeneration) {
+        cancelPreflightWork();
+        const metadata = getLatestUserPreflight();
+        if (metadata) setPreflightInjection(metadata);
+        return;
+    }
+
+    const hasPendingUserText = (type === undefined || type === 'normal')
+        && Boolean(String($('#send_textarea').val() ?? '').trim());
+    if (!preflightEventGate.groupActive || hasPendingUserText || ![undefined, 'normal'].includes(type)) {
+        cancelPreflightWork();
+    }
+}
+
+function onPreflightGenerationAfterCommands(type, params, dryRun) {
+    const armed = preflightEventGate.arm({
+        type,
+        automaticTrigger: params?.automatic_trigger,
+        dryRun,
+        userText: $('#send_textarea').val(),
+    });
+    if (armed) clearPreflightInjection();
+}
+
+async function onPreflightMessageSent(messageId) {
+    const ctx = getContext();
+    const chat = ctx?.chat;
+    const message = Array.isArray(chat) ? chat[Number(messageId)] : null;
+    if (!preflightEventGate.consume(message?.is_user && !message?.is_system)) return;
+    await runPreflightForUserMessage(ctx, chat, message);
+}
+
+function onPreflightGenerationEnded() {
+    if (!preflightEventGate.groupActive) cancelPreflightWork();
+}
+
+function onPreflightGenerationStopped() {
+    cancelAllPluginWork();
+}
+
+function onPreflightGroupStarted({ type } = {}) {
+    preflightEventGate.startGroup();
+    cancelPostflightWork({ detach: true });
+    cancelPreflightWork({ clearInjection: false });
+    if (shouldRestoreGroupPreflight({
+        type,
+        userText: $('#send_textarea').val(),
+    })) {
+        const metadata = getLatestUserPreflight();
+        if (metadata) setPreflightInjection(metadata);
+    }
+}
+
+function onPreflightGroupFinished() {
+    preflightEventGate.finishGroup();
+    cancelPreflightWork();
+}
+
+function onPreflightChatChanged() {
+    preflightEventGate.finishGroup();
+    cancelAllPluginWork();
+}
+
+function getLocationSnapshotFromState(state) {
+    if (!state) return null;
+    if (Number.isFinite(state.lng) && Number.isFinite(state.lat)) {
+        return {
+            lng: state.lng,
+            lat: state.lat,
+            label: state.label || '当前位置',
+        };
+    }
+    if (state.mode === 'moving'
+        && Number.isFinite(state.from?.lng)
+        && Number.isFinite(state.from?.lat)) {
+        const currentPosition = getMovingRoutePosition(state);
+        if (!currentPosition) return null;
+        return {
+            lng: currentPosition.lng,
+            lat: currentPosition.lat,
+            label: state.from.label || '当前位置',
+        };
+    }
+    return null;
+}
+
+function getCurrentLocationSnapshot() {
+    return getLocationSnapshotFromState(getChatState());
+}
+
+function getPreviousAiMessage(chat, userMessage) {
+    const index = chat.indexOf(userMessage);
+    if (index < 0) return null;
+    return chat.slice(0, index).reverse().find(item => item && !item.is_user && !item.is_system) || null;
+}
+
+function getPluginLlmMessageText(chat, message) {
+    if (!message || typeof message.mes !== 'string') return '';
+    const promptMessages = chat.filter(item => item && !item.is_system && typeof item.mes === 'string');
+    const messageIndex = promptMessages.indexOf(message);
+    const depth = messageIndex < 0 ? undefined : promptMessages.length - messageIndex - 1;
+    const placement = message.is_user ? regex_placement.USER_INPUT : regex_placement.AI_OUTPUT;
+    try {
+        return getRegexedString(message.mes, placement, {
+            isPrompt: true,
+            depth,
+        });
+    } catch (error) {
+        console.warn('[realmap] failed to apply active prompt regex', error);
+        return message.mes;
+    }
+}
+
+function waitBeforeDeadline(promise, deadline, fallback = null, signal = null) {
+    const timeoutMs = Math.max(0, deadline - Date.now());
+    if (timeoutMs <= 0 || signal?.aborted) return Promise.resolve(fallback);
+    return new Promise((resolve) => {
+        let settled = false;
+        let timer = null;
+        const onAbort = () => finish(fallback);
+        const finish = (value) => {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            signal?.removeEventListener('abort', onAbort);
+            resolve(value);
+        };
+        timer = setTimeout(() => finish(fallback), timeoutMs);
+        signal?.addEventListener('abort', onAbort, { once: true });
+        Promise.resolve(promise).then(finish, () => finish(fallback));
+    });
+}
+
+function waitForSignal(promise, signal, fallback = null) {
+    if (signal?.aborted) return Promise.resolve(fallback);
+    return new Promise((resolve) => {
+        let settled = false;
+        const onAbort = () => finish(fallback);
+        const finish = (value) => {
+            if (settled) return;
+            settled = true;
+            signal?.removeEventListener('abort', onAbort);
+            resolve(value);
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+        Promise.resolve(promise).then(finish, () => finish(fallback));
+    });
+}
+
+function runAmapCallbackWithSignal(start, signal, fallback = null) {
+    if (signal?.aborted) return Promise.resolve(fallback);
+    return new Promise((resolve) => {
+        let settled = false;
+        const onAbort = () => finish(fallback);
+        const finish = (value) => {
+            if (settled) return;
+            settled = true;
+            signal?.removeEventListener('abort', onAbort);
+            resolve(value);
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+        try {
+            start(finish);
+        } catch (_) {
+            finish(fallback);
+        }
+    });
+}
+
+async function runPreflightForUserMessage(ctx, chat, message) {
+    const settings = ensureSettings();
+    if (!isExtensionEnabledForChat()
+        || !settings.key
+        || !settings.llmApiKey
+        || !settings.llmModel) {
+        clearPreflightInjection();
+        return;
+    }
+
+    cancelPreflightWork({ clearInjection: true, disarm: false });
+    const runId = preflightRunId;
+    const runController = new AbortController();
+    preflightAbortController = runController;
+    const deadline = Date.now() + PREFLIGHT_TOTAL_TIMEOUT_MS;
+    const current = getCurrentLocationSnapshot();
+    const previousAi = getPreviousAiMessage(chat, message);
+    const previousAiText = getPluginLlmMessageText(chat, previousAi);
+    const currentUserText = getPluginLlmMessageText(chat, message);
+    const messages = [
+        { role: 'system', content: PREFLIGHT_SYSTEM_PROMPT },
+        { role: 'assistant', content: PREFLIGHT_ASSISTANT_REPLY },
+        {
+            role: 'user',
+            content: renderPreflightPrompt({
+                currentLocation: formatPluginLocation(current),
+                previousAi: previousAiText || '无',
+                currentUser: currentUserText || '无',
+            }),
+        },
+    ];
+
+    preflightLlmDebugByMessage.delete(message);
+    const rawIntent = await callPluginLlm(settings, messages, {
+        maxTokens: PLUGIN_LLM_MAX_TOKENS,
+        showDebug: false,
+        manageUi: false,
+        timeoutMs: Math.max(0, deadline - Date.now()),
+        abortController: runController,
+        debugLabel: '正文前信息补充LLM',
+        onDebugReport: report => preflightLlmDebugByMessage.set(message, report),
+    });
+    if (runId !== preflightRunId || getContext()?.chat !== chat) return;
+
+    const intent = normalizePreflightIntent(rawIntent, [currentUserText]);
+    if (intent.action !== 'route') {
+        console.debug('[realmap] preflight: no movement intent');
+        clearPreflightInjection();
+        return;
+    }
+
+    const AMap = await waitBeforeDeadline(loadAmap(), deadline, null, runController.signal);
+    if (!AMap || runId !== preflightRunId || getContext()?.chat !== chat) return;
+
+    let from = current;
+    if (intent.from) {
+        from = await waitBeforeDeadline(
+            resolvePlaceCandidate(AMap, intent.from, current, runController.signal),
+            deadline,
+            null,
+            runController.signal,
+        );
+    }
+    if (!from) {
+        console.debug('[realmap] preflight: unresolved origin');
+        clearPreflightInjection();
+        return;
+    }
+
+    const to = await waitBeforeDeadline(
+        resolvePlaceCandidate(AMap, intent.to, from, runController.signal),
+        deadline,
+        null,
+        runController.signal,
+    );
+    if (!to || runId !== preflightRunId || getContext()?.chat !== chat) {
+        console.debug('[realmap] preflight: unresolved destination');
+        clearPreflightInjection();
+        return;
+    }
+
+    const routes = await queryRouteOptions(AMap, {
+        from,
+        to,
+        modes: intent.modes,
+        deadline,
+        signal: runController.signal,
+    });
+    if (runId !== preflightRunId || getContext()?.chat !== chat) return;
+    if (!routes.length) {
+        console.debug('[realmap] preflight: no route result');
+        clearPreflightInjection();
+        return;
+    }
+
+    const metadata = {
+        v: 1,
+        captured_at: Date.now(),
+        source_fingerprint: getPreflightSourceFingerprint(message.mes),
+        intent,
+        from: {
+            label: from.name || from.label || '当前位置',
+            lng: from.lng,
+            lat: from.lat,
+        },
+        to: {
+            label: to.name || to.label || intent.to.full,
+            lng: to.lng,
+            lat: to.lat,
+        },
+        routes,
+    };
+    if (!message.extra) message.extra = {};
+    message.extra.realmap_preflight = metadata;
+    const context = setPreflightInjection(metadata);
+    if (!context) return;
+
+    console.debug('[realmap] preflight route context', metadata);
+    if (typeof ctx.saveChat === 'function') {
+        void Promise.resolve(ctx.saveChat()).catch(error => {
+            console.warn('[realmap] failed to save preflight metadata', error);
+        });
+    }
 }
 
 function injectMinimapHtml() {
@@ -321,8 +878,8 @@ async function onChatChanged() {
         hideMinimap();
         return;
     }
-    const enabled = isExtensionEnabledForChat();
-    if (enabled) {
+    const enabledState = getExtensionEnabledStateForChat();
+    if (enabledState === true) {
         // 刷新后 chat_metadata 可能过期/为空，从最后一条 AI 消息同步位置
         const last = findLastAiMessage();
         if (last?.message?.extra?.realmap) {
@@ -330,6 +887,10 @@ async function onChatChanged() {
         }
         await refreshMap();
         showMinimap();
+        return;
+    }
+    if (enabledState === false) {
+        hideMinimap();
         return;
     }
     const last = findLastAiMessage();
@@ -343,18 +904,19 @@ async function onChatChanged() {
     if (last) {
         const ok = await askEnable('是否在本聊天启用现实地图？');
         if (!ok) {
-            setExtensionEnabledForChat(false);
+            setExtensionEnabledForChat(false, { immediate: true });
             hideMinimap();
             return;
         }
         setExtensionEnabledForChat(true);
-        await inferLocationFromVisible();
+        const inferred = await inferLocationFromVisible();
+        if (inferred === PLUGIN_CALL_CANCELLED) return;
         await refreshMap();
         showMinimap();
     } else {
         const ok = await askEnable('是否启用现实地图？');
         if (!ok) {
-            setExtensionEnabledForChat(false);
+            setExtensionEnabledForChat(false, { immediate: true });
             hideMinimap();
             return;
         }
@@ -368,13 +930,15 @@ async function onChatChanged() {
 async function onAiMessage(_messageId) {
     if (!isChatOpen() || !isExtensionEnabledForChat()) return;
     const loc = await inferLocationFromVisible();
+    if (loc === PLUGIN_CALL_CANCELLED) return;
     await refreshMap();
     updateExtensionPrompt();
 }
 
 async function handleRejudge() {
     if (!isChatOpen() || !isExtensionEnabledForChat()) return;
-    await inferLocationFromVisible();
+    const loc = await inferLocationFromVisible();
+    if (loc === PLUGIN_CALL_CANCELLED) return;
     await refreshMap();
     updateExtensionPrompt();
 }
@@ -394,10 +958,11 @@ function refreshEnableButton() {
 async function handleEnableFromSettings() {
     if (!isChatOpen()) return;
     if (isExtensionEnabledForChat()) return;
-    setExtensionEnabledForChat(true);
+    setExtensionEnabledForChat(true, { immediate: true });
     const last = findLastAiMessage();
     if (last) {
-        await inferLocationFromVisible();
+        const loc = await inferLocationFromVisible();
+        if (loc === PLUGIN_CALL_CANCELLED) return;
     }
     await refreshMap();
     showMinimap();
@@ -420,6 +985,7 @@ async function handleDisableClick() {
                 if (popup.result !== POPUP_RESULT.AFFIRMATIVE) return;
                 const alsoClear = Boolean(popup.inputResults.get(clearId));
                 setExtensionEnabledForChat(false, { immediate: true });
+                cancelAllPluginWork();
                 if (alsoClear) {
                     clearAllChatLocations();
                 }
@@ -449,53 +1015,157 @@ async function inferLocationFromVisible() {
     const last = findLastAiMessage();
     if (!last) return null;
 
-    const messages = buildLlmMessages(chat);
-    const llmResult = await callPluginLlm(s, messages);
-    if (!llmResult) {
-        return copyPrevLocation();
-    }
+    cancelPostflightWork({ detach: true });
+    const runId = postflightRunId;
+    const controller = new AbortController();
+    postflightAbortController = controller;
+    deactivateSendButtons();
 
-    const loc = await resolveLocation(llmResult, last);
-    return loc;
+    try {
+        const roundContext = getRoundContext(chat);
+        const regexedNarrative = {
+            previousAi: getPluginLlmMessageText(chat, roundContext.prevAiMes),
+            currentUser: getPluginLlmMessageText(chat, roundContext.curUserMes),
+            currentAi: getPluginLlmMessageText(chat, roundContext.curAiMes),
+        };
+        const messages = buildLlmMessages(chat, roundContext, regexedNarrative);
+        const preflightDebugReport = preflightLlmDebugByMessage.get(roundContext.curUserMes) || '';
+        const rawResult = await callPluginLlm(s, messages, {
+            maxTokens: PLUGIN_LLM_MAX_TOKENS,
+            manageUi: false,
+            registerExternalAbort: false,
+            abortController: controller,
+            debugLabel: '输出后位置推断LLM',
+            prependDebugReports: [preflightDebugReport],
+        });
+        if (controller.signal.aborted
+            || runId !== postflightRunId
+            || getContext()?.chat !== chat) {
+            return PLUGIN_CALL_CANCELLED;
+        }
+
+        const llmResult = refineLlmLocationResult(
+            rawResult,
+            [regexedNarrative.currentAi, regexedNarrative.currentUser],
+        );
+        if (!llmResult) return copyPrevLocation();
+
+        const loc = await resolveLocation(llmResult, last, controller.signal);
+        if (controller.signal.aborted
+            || runId !== postflightRunId
+            || getContext()?.chat !== chat) {
+            return PLUGIN_CALL_CANCELLED;
+        }
+        return loc;
+    } finally {
+        if (postflightAbortController === controller) {
+            postflightAbortController = null;
+            activateSendButtons();
+        }
+    }
 }
 
-function buildLlmMessages(chat) {
+function getRoundContext(chat) {
     const visible = chat.filter(m => !m?.is_system && typeof m?.mes === 'string');
     const lastIdx = visible.length - 1;
     const prevAiMes = visible.slice(0, lastIdx).reverse().find(m => !m.is_user);
     const curAiMes = visible[lastIdx];
     const curUserMes = visible.slice(0, lastIdx).reverse().find(m => m.is_user);
+    return { prevAiMes, curAiMes, curUserMes };
+}
+
+function buildLlmMessages(chat, roundContext = getRoundContext(chat), regexedNarrative = null) {
+    const { prevAiMes, curAiMes, curUserMes } = roundContext;
+    const narrative = regexedNarrative || {
+        previousAi: getPluginLlmMessageText(chat, prevAiMes),
+        currentUser: getPluginLlmMessageText(chat, curUserMes),
+        currentAi: getPluginLlmMessageText(chat, curAiMes),
+    };
 
     const prevLoc = prevAiMes?.extra?.realmap;
-    const previousLocation = prevLoc?.label || prevLoc?.from?.label || '无';
+    const previousLocation = formatPluginLocation(getLocationSnapshotFromState(prevLoc));
     const contextPrompt = renderContextPrompt({
         previousLocation,
-        previousAi: prevAiMes?.mes || '无',
-        currentUser: curUserMes?.mes || '无',
-        currentAi: curAiMes?.mes || '无',
+        previousAi: narrative.previousAi || '无',
+        currentUser: narrative.currentUser || '无',
+        currentAi: narrative.currentAi || '无',
     });
 
     const messages = [
         { role: 'system', content: DEFAULT_SYSTEM_PROMPT },
         { role: 'assistant', content: DEFAULT_ASSISTANT_REPLY },
         { role: 'user', content: contextPrompt },
-        { role: 'assistant', content: DEFAULT_ASSISTANT_PREFILL },
     ];
     return messages;
 }
 
-async function callPluginLlm(s, messages) {
+function refineLlmLocationResult(result, narrativeTexts) {
+    if (!result || result.action === 'null') return result;
+    if (result.action === 'idle' && result.place) {
+        return {
+            ...result,
+            place: refinePlaceIntentFromNarrative(result.place, narrativeTexts),
+        };
+    }
+    if (result.action === 'moving' && result.from && result.to) {
+        return {
+            ...result,
+            from: refinePlaceIntentFromNarrative(result.from, narrativeTexts),
+            to: refinePlaceIntentFromNarrative(result.to, narrativeTexts),
+        };
+    }
+    return result;
+}
+
+function getNarrativeElapsedMinutes(result) {
+    const value = Number(result?.elapsed_min);
+    if (!Number.isFinite(value) || value <= 0) return 0;
+    return Math.round(value * 10) / 10;
+}
+
+async function callPluginLlm(s, messages, {
+    maxTokens = PLUGIN_LLM_MAX_TOKENS,
+    showDebug = true,
+    manageUi = true,
+    timeoutMs = null,
+    registerExternalAbort = manageUi,
+    abortController = null,
+    debugLabel = '插件LLM',
+    prependDebugReports = [],
+    onDebugReport = null,
+} = {}) {
     const baseUrl = getLlmBaseUrl(s);
     if (!baseUrl) return null;
+    if (timeoutMs !== null && timeoutMs <= 0) return null;
 
-    llmAbortController = new AbortController();
-    setExternalAbortController(llmAbortController);
-    deactivateSendButtons();
+    const controller = abortController || new AbortController();
+    let timeout = null;
+    let timedOut = false;
+    if (registerExternalAbort) {
+        llmAbortController = controller;
+        setExternalAbortController(controller);
+    }
+    if (manageUi) deactivateSendButtons();
+    if (timeoutMs > 0) {
+        timeout = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+        }, timeoutMs);
+    }
 
     let result = null;
     let rawContent = '';
     let aborted = false;
     let errorMsg = '';
+    let responseText = '';
+    let responseData = null;
+    let httpStatus = 0;
+    let httpStatusText = '';
+    let requestId = '';
+    let contentSource = '';
+    let finishReason = '';
+    let responseModel = '';
+    let usage = null;
 
     try {
         const resp = await fetch(`${baseUrl}/chat/completions`, {
@@ -508,30 +1178,49 @@ async function callPluginLlm(s, messages) {
                 model: s.llmModel,
                 messages,
                 temperature: 0.1,
-                max_tokens: 300,
+                max_tokens: maxTokens,
             }),
-            signal: llmAbortController.signal,
+            signal: controller.signal,
         });
-        if (!resp.ok) {
-            errorMsg = `HTTP ${resp.status}`;
-        } else {
-            const data = await resp.json();
-            rawContent = data?.choices?.[0]?.message?.content || '';
-            const trailingAssistant = messages.at(-1)?.role === 'assistant'
-                ? String(messages.at(-1)?.content || '')
-                : '';
-            const parseCandidates = [rawContent];
-            if (trailingAssistant && !rawContent.trimStart().startsWith(trailingAssistant)) {
-                parseCandidates.push(`${trailingAssistant}${rawContent}`);
+        httpStatus = resp.status;
+        httpStatusText = resp.statusText || '';
+        requestId = resp.headers.get('x-request-id')
+            || resp.headers.get('request-id')
+            || resp.headers.get('x-trace-id')
+            || resp.headers.get('cf-ray')
+            || '';
+        responseText = await resp.text();
+        if (responseText) {
+            try {
+                responseData = JSON.parse(responseText);
+            } catch (error) {
+                if (resp.ok) {
+                    errorMsg = `响应JSON解析失败：${error.message}`;
+                }
             }
-            for (const candidate of parseCandidates) {
-                const jsonMatch = candidate.match(/\{[\s\S]*\}/);
-                if (!jsonMatch) continue;
-                try {
-                    result = JSON.parse(jsonMatch[0]);
-                    break;
-                } catch (_) {
-                    // 尝试下一个包含预填充内容的候选文本。
+        }
+
+        const parsedResponse = parseLlmResponsePayload(responseData);
+        rawContent = parsedResponse.rawContent;
+        contentSource = parsedResponse.contentSource;
+        finishReason = parsedResponse.finishReason;
+        responseModel = parsedResponse.model;
+        usage = parsedResponse.usage;
+
+        if (!resp.ok) {
+            const detail = parsedResponse.apiError || responseText.trim() || httpStatusText;
+            errorMsg = `HTTP ${resp.status}${detail ? `：${detail}` : ''}`;
+        } else {
+            if (parsedResponse.apiError) {
+                errorMsg = parsedResponse.apiError;
+            } else if (!rawContent && !errorMsg) {
+                const finishDetail = finishReason ? `，finish_reason=${finishReason}` : '';
+                errorMsg = `API返回HTTP ${resp.status}，但未找到可解析的LLM正文${finishDetail}`;
+            }
+            if (rawContent) {
+                const extracted = extractJsonObject(rawContent);
+                if (extracted) {
+                    result = extracted.value;
                 }
             }
         }
@@ -542,14 +1231,46 @@ async function callPluginLlm(s, messages) {
             errorMsg = e.message;
         }
     } finally {
-        llmAbortController = null;
-        activateSendButtons();
+        if (timeout) clearTimeout(timeout);
+        if (registerExternalAbort && llmAbortController === controller) {
+            llmAbortController = null;
+        }
+        if (manageUi) activateSendButtons();
     }
 
-    if (!aborted) {
-        const parts = [`=== 发送给 LLM 的消息 ===\n${JSON.stringify(messages, null, 2)}`];
+    if (!showDebug) {
+        if (aborted) {
+            console.debug('[realmap] silent plugin LLM request aborted');
+        } else if (errorMsg) {
+            console.warn('[realmap] silent plugin LLM request failed:', errorMsg);
+        } else if (rawContent && !result) {
+            console.warn('[realmap] silent plugin LLM response was not valid JSON');
+        }
+    }
+
+    let currentDebugReport = '';
+    if (showDebug || typeof onDebugReport === 'function') {
+        const parts = [
+            `################ ${debugLabel} ################`,
+            `=== 发送给LLM的消息 ===\n${JSON.stringify(messages, null, 2)}`,
+        ];
+        const responseMeta = [
+            `状态：${httpStatus || '未收到'}${httpStatusText ? ` ${httpStatusText}` : ''}`,
+            `请求输出上限：${maxTokens}tokens`,
+            requestId ? `请求ID：${requestId}` : '',
+            responseModel ? `响应模型：${responseModel}` : '',
+            finishReason ? `finish_reason：${finishReason}` : '',
+            contentSource ? `正文来源：${contentSource}` : '',
+            usage ? `usage：${JSON.stringify(usage)}` : '',
+        ].filter(Boolean);
+        parts.push(`=== API 响应信息 ===\n${responseMeta.join('\n')}`);
+        if (responseData !== null) {
+            parts.push(`=== API 完整响应 ===\n${stringifyLlmResponse(responseData)}`);
+        } else if (responseText) {
+            parts.push(`=== API 原始响应正文 ===\n${responseText.slice(0, 20_000)}${responseText.length > 20_000 ? '\n…响应过长，已截断' : ''}`);
+        }
         if (rawContent) {
-            parts.push(`=== LLM 原始输出 ===\n${rawContent}`);
+            parts.push(`=== LLM原始输出${contentSource ? `（${contentSource}）` : ''} ===\n${rawContent}`);
         }
         if (result) {
             parts.push(`=== 解析结果 ===\n${JSON.stringify(result, null, 2)}`);
@@ -557,8 +1278,21 @@ async function callPluginLlm(s, messages) {
             parts.push(`=== 错误 ===\n${errorMsg}`);
         } else if (rawContent) {
             parts.push(`=== 解析结果 ===\nJSON 解析失败`);
+        } else if (aborted) {
+            parts.push(`=== 状态 ===\n${timedOut ? '请求超时' : '请求已取消'}`);
         }
-        const debugText = parts.join('\n\n');
+        currentDebugReport = parts.join('\n\n');
+        if (typeof onDebugReport === 'function') {
+            try {
+                onDebugReport(currentDebugReport);
+            } catch (error) {
+                console.warn('[realmap] failed to capture plugin LLM debug report', error);
+            }
+        }
+    }
+
+    if (showDebug && !aborted) {
+        const debugText = combineLlmDebugReports(prependDebugReports, currentDebugReport);
         const escapeHtml = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         const debugHtml = `<pre style="white-space:pre-wrap;font-size:12px;max-height:60vh;overflow-y:auto;color:var(--SmartThemeBodyColor);background:rgba(0,0,0,0.3);padding:12px;border-radius:4px">${escapeHtml(debugText)}</pre>`;
         const popup = new Popup(debugHtml, POPUP_TYPE.DISPLAY, '', { wide: true, large: true, okButton: '关闭', cancelButton: false });
@@ -568,43 +1302,77 @@ async function callPluginLlm(s, messages) {
     return result;
 }
 
-async function resolveLocation(llmResult, lastAiMessage) {
-    if (!llmResult || llmResult.action === 'null') return null;
-    const AMap = await loadAmap();
+async function resolveLocation(llmResult, lastAiMessage, signal = null) {
+    if (!llmResult || llmResult.action === 'null' || signal?.aborted) return null;
+    const AMap = await waitForSignal(loadAmap(), signal, null);
+    if (!AMap || signal?.aborted) return null;
 
     if (llmResult.action === 'idle' && llmResult.place) {
-        return await resolveIdle(AMap, llmResult, lastAiMessage);
+        return await resolveIdle(AMap, llmResult, lastAiMessage, signal);
     }
     if (llmResult.action === 'moving' && llmResult.from && llmResult.to) {
-        return await resolveMoving(AMap, llmResult, lastAiMessage);
+        return await resolveMoving(AMap, llmResult, lastAiMessage, signal);
     }
     return null;
 }
 
-async function resolveIdle(AMap, llmResult, lastAiMessage) {
-    const resolvedPlace = await resolvePlaceCandidate(AMap, llmResult.place, getCurrentPosition());
-    if (!resolvedPlace) return null;
+async function resolveIdle(AMap, llmResult, lastAiMessage, signal = null) {
+    const resolvedPlace = await resolvePlaceCandidate(
+        AMap,
+        llmResult.place,
+        getCurrentPosition(),
+        signal,
+    );
+    if (!resolvedPlace || signal?.aborted) return null;
     const { lng, lat } = resolvedPlace;
 
     const placeSearch = new AMap.PlaceSearch({ pageSize: 10, pageIndex: 1 });
-    const nearby = await fetchNearbySummary(placeSearch, lng, lat);
-    const label = resolvedPlace.name || await reverseGeocode(AMap, lng, lat) || llmResult.place;
+    const nearby = await fetchNearbySummary(placeSearch, lng, lat, signal);
+    const label = resolvedPlace.name || await reverseGeocode(AMap, lng, lat, signal);
+    if (signal?.aborted) return null;
 
     const loc = {
         v: 2, captured_at: Date.now(),
         mode: 'idle', lng, lat, label,
         poi: llmResult.poi ?? false, nearby,
+        ...(resolvedPlace.resolution ? { resolution: resolvedPlace.resolution } : {}),
     };
     writeLocationToMessage(lastAiMessage, loc);
     setChatState(loc);
     return loc;
 }
 
-async function resolveMoving(AMap, llmResult, lastAiMessage) {
+async function resolveMoving(AMap, llmResult, lastAiMessage, signal = null) {
+    const previousState = getChatState();
     const previousPosition = getCurrentPosition();
-    const fromCoords = await resolvePlaceCandidate(AMap, llmResult.from, previousPosition);
-    const toCoords = await resolvePlaceCandidate(AMap, llmResult.to, fromCoords || previousPosition);
-    if (!fromCoords || !toCoords) return null;
+    const previousLocation = getLocationSnapshotFromState(previousState);
+    const fromIntent = normalizePlaceIntent(llmResult.from);
+    const reusePreviousOrigin = previousPosition
+        && previousLocation
+        && placeLabelsReferToSameLocation(fromIntent.full, previousLocation.label);
+    const previousResolution = previousState?.mode === 'moving'
+        ? previousState.from?.resolution
+        : previousState?.resolution;
+    const fromCoords = reusePreviousOrigin
+        ? {
+            lng: previousPosition.lng,
+            lat: previousPosition.lat,
+            name: previousLocation.label,
+            ...(previousResolution ? { resolution: previousResolution } : {}),
+        }
+        : await resolvePlaceCandidate(
+            AMap,
+            llmResult.from,
+            previousPosition,
+            signal,
+        );
+    const toCoords = await resolvePlaceCandidate(
+        AMap,
+        llmResult.to,
+        fromCoords || previousPosition,
+        signal,
+    );
+    if (!fromCoords || !toCoords || signal?.aborted) return null;
 
     const routeMode = llmResult.route_mode || 'walking';
     const modeMap = {
@@ -616,18 +1384,24 @@ async function resolveMoving(AMap, llmResult, lastAiMessage) {
 
     const opts = {};
     if (routeMode === 'transfer') {
-        const cityRes = await reverseGeocodeComponent(AMap, fromCoords.lng, fromCoords.lat);
+        const cityRes = await reverseGeocodeComponent(
+            AMap,
+            fromCoords.lng,
+            fromCoords.lat,
+            signal,
+        );
+        if (signal?.aborted) return null;
         opts.city = cityRes?.city || cityRes?.province || '全国';
     }
     const router = new routeCls(opts);
-    const routeResult = await new Promise((resolve) => {
+    const routeResult = await runAmapCallbackWithSignal((finish) => {
         const origin = new AMap.LngLat(fromCoords.lng, fromCoords.lat);
         const dest = new AMap.LngLat(toCoords.lng, toCoords.lat);
         router.search(origin, dest, (status, result) => {
-            resolve(status === 'complete' ? result : null);
+            finish(status === 'complete' ? result : null);
         });
-    });
-    if (!routeResult) return null;
+    }, signal, null);
+    if (!routeResult || signal?.aborted) return null;
 
     const route = routeMode === 'transfer' ? routeResult.plans?.[0] : routeResult.routes?.[0];
     if (!route) return null;
@@ -636,16 +1410,43 @@ async function resolveMoving(AMap, llmResult, lastAiMessage) {
     const totalDist = route.distance;
     const polyline = extractRoutePolyline(route, routeMode);
 
+    const routeDurationMin = Number(totalTime) / 60;
+    const elapsedMin = getNarrativeElapsedMinutes(llmResult);
+    const progressRatio = getMovingProgress(elapsedMin, routeDurationMin);
+    const progressedPosition = progressRatio > 0
+        ? getPointAlongRoute(polyline, progressRatio)
+        : null;
+    const currentRoutePosition = progressedPosition
+        || projectPointToRoute(fromCoords, polyline)
+        || fromCoords;
     const placeSearch = new AMap.PlaceSearch({ pageSize: 10, pageIndex: 1 });
-    const nearby = await fetchNearbySummary(placeSearch, fromCoords.lng, fromCoords.lat);
+    const nearby = await fetchNearbySummary(
+        placeSearch,
+        currentRoutePosition.lng,
+        currentRoutePosition.lat,
+        signal,
+    );
+    if (signal?.aborted) return null;
 
     const loc = {
         v: 2, captured_at: Date.now(),
         mode: 'moving',
-        from: { lng: fromCoords.lng, lat: fromCoords.lat, label: fromCoords.name || llmResult.from },
-        to: { lng: toCoords.lng, lat: toCoords.lat, label: toCoords.name || llmResult.to },
+        from: {
+            lng: currentRoutePosition.lng,
+            lat: currentRoutePosition.lat,
+            label: fromCoords.name,
+            ...(fromCoords.resolution ? { resolution: fromCoords.resolution } : {}),
+        },
+        to: {
+            lng: toCoords.lng,
+            lat: toCoords.lat,
+            label: toCoords.name,
+            ...(toCoords.resolution ? { resolution: toCoords.resolution } : {}),
+        },
         route_mode: routeMode,
-        duration_min: Math.round(totalTime / 60),
+        duration_min: Math.round(routeDurationMin),
+        elapsed_min: elapsedMin,
+        progress_ratio: Math.round(progressRatio * 10_000) / 10_000,
         distance: totalDist,
         polyline,
         nearby,
@@ -687,58 +1488,149 @@ function extractRoutePolyline(route, mode) {
     return pts;
 }
 
-async function resolvePlaceCandidate(AMap, query, origin = null) {
-    const ranked = await searchRankedPlaces(AMap, query, { origin });
-    const best = ranked[0];
-    const location = getRankedPoiLocation(best);
-    if (location && best.score >= MIN_INFERENCE_PLACE_SCORE) {
+async function resolvePlaceCandidate(AMap, query, origin = null, signal = null) {
+    const intent = normalizePlaceIntent(query);
+    if (!intent.full || signal?.aborted) return null;
+
+    const narrativeResult = await resolveNarrativePlace(AMap, intent, { origin, signal });
+    if (signal?.aborted) return null;
+    if (narrativeResult) {
+        const location = {
+            lng: narrativeResult.lng,
+            lat: narrativeResult.lat,
+        };
         return {
             ...location,
-            name: best.poi?.name || String(query),
-            address: best.poi?.address || '',
-            score: best.score,
+            name: intent.full,
+            address: narrativeResult.poi?.address || '',
+            score: narrativeResult.confidence === 'high' ? 300 : narrativeResult.confidence === 'medium' ? 200 : 100,
+            resolution: createResolutionMetadata(narrativeResult),
         };
     }
 
-    const geocoder = new AMap.Geocoder({ city: '全国' });
-    return new Promise((resolve) => {
-        geocoder.getLocation(query, (status, result) => {
+    if (!intent.hierarchical) {
+        const ranked = await searchRankedPlaces(AMap, intent.full, {
+            origin,
+            city: intent.city || '全国',
+            signal,
+        });
+        if (signal?.aborted) return null;
+        const best = ranked[0];
+        const location = getRankedPoiLocation(best);
+        if (location && best.score >= MIN_INFERENCE_PLACE_SCORE) {
+            return {
+                ...location,
+                name: intent.full,
+                address: best.poi?.address || '',
+                score: best.score,
+                resolution: {
+                    query: intent.full,
+                    parent: intent.parent,
+                    subplace: intent.subplace,
+                    kind: intent.kind,
+                    strategy: 'flat-ranked',
+                    confidence: best.score >= 300 ? 'high' : 'medium',
+                    poi_id: getPoiId(best.poi),
+                    parent_poi_id: '',
+                    resolved_name: String(best.poi?.name ?? ''),
+                },
+            };
+        }
+    }
+
+    const geocoder = new AMap.Geocoder({ city: intent.city || '全国' });
+    return runAmapCallbackWithSignal((finish) => {
+        geocoder.getLocation(intent.full, (status, result) => {
             const geocode = status === 'complete' ? result?.geocodes?.[0] : null;
             const loc = geocode?.location;
-            resolve(loc ? {
-                lng: loc.getLng(),
-                lat: loc.getLat(),
-                name: geocode.formattedAddress || String(query),
+            if (!loc || !isReliableGeocode(geocode, intent.city)) {
+                finish(null);
+                return;
+            }
+            const lng = typeof loc.getLng === 'function' ? loc.getLng() : Number(loc.lng);
+            const lat = typeof loc.getLat === 'function' ? loc.getLat() : Number(loc.lat);
+            finish(Number.isFinite(lng) && Number.isFinite(lat) ? {
+                lng,
+                lat,
+                name: intent.full,
                 address: geocode.formattedAddress || '',
                 score: 0,
+                resolution: {
+                    query: intent.full,
+                    parent: intent.parent,
+                    subplace: intent.subplace,
+                    kind: intent.kind,
+                    strategy: 'geocode-fallback',
+                    confidence: 'low',
+                    poi_id: '',
+                    parent_poi_id: '',
+                    resolved_name: String(geocode.formattedAddress ?? ''),
+                },
             } : null);
         });
-    });
+    }, signal, null);
 }
 
-async function reverseGeocode(AMap, lng, lat) {
-    return new Promise((resolve) => {
+function createResolutionMetadata(result) {
+    return {
+        query: result.intent?.full || result.label || '',
+        parent: result.intent?.parent || '',
+        subplace: result.intent?.subplace || '',
+        kind: result.intent?.kind || 'unknown',
+        strategy: result.strategy || '',
+        confidence: result.confidence || 'low',
+        poi_id: getPoiId(result.poi),
+        parent_poi_id: result.parentPoiId || getPoiId(result.parentPoi),
+        resolved_name: String(result.poi?.name ?? ''),
+    };
+}
+
+function getPoiId(poi) {
+    const id = poi?.id ?? poi?.poiId ?? poi?.poiid;
+    return typeof id === 'string' || typeof id === 'number' ? String(id) : '';
+}
+
+function isReliableGeocode(geocode, city) {
+    if (!geocode) return false;
+    const level = String(geocode.level ?? '');
+    if (/^(省|市|区县|乡镇)$/u.test(level)) return false;
+
+    const normalizedCity = String(city ?? '').replace(/\s+/g, '');
+    if (!normalizedCity) return true;
+    const shortCity = normalizedCity.replace(/(特别行政区|自治州|地区|市)$/u, '');
+    const administrativeText = [
+        geocode.formattedAddress,
+        geocode.province,
+        geocode.city,
+        geocode.district,
+    ].filter(Boolean).join('').replace(/\s+/g, '');
+    return administrativeText.includes(normalizedCity)
+        || (shortCity.length >= 2 && administrativeText.includes(shortCity));
+}
+
+async function reverseGeocode(AMap, lng, lat, signal = null) {
+    return runAmapCallbackWithSignal((finish) => {
         const geocoder = new AMap.Geocoder();
         geocoder.getAddress([lng, lat], (status, result) => {
-            resolve(status === 'complete' ? result?.regeocode?.formattedAddress : null);
+            finish(status === 'complete' ? result?.regeocode?.formattedAddress : null);
         });
-    });
+    }, signal, null);
 }
 
-async function reverseGeocodeComponent(AMap, lng, lat) {
-    return new Promise((resolve) => {
+async function reverseGeocodeComponent(AMap, lng, lat, signal = null) {
+    return runAmapCallbackWithSignal((finish) => {
         const geocoder = new AMap.Geocoder();
         geocoder.getAddress([lng, lat], (status, result) => {
-            resolve(status === 'complete' ? result?.regeocode?.addressComponent : null);
+            finish(status === 'complete' ? result?.regeocode?.addressComponent : null);
         });
-    });
+    }, signal, null);
 }
 
-async function fetchNearbySummary(placeSearch, lng, lat) {
-    return new Promise((resolve) => {
+async function fetchNearbySummary(placeSearch, lng, lat, signal = null) {
+    return runAmapCallbackWithSignal((finish) => {
         placeSearch.searchNearBy('', [lng, lat], 500, (status, result) => {
             if (status !== 'complete' || !result?.poiList?.pois?.length) {
-                resolve('');
+                finish('');
                 return;
             }
             const pois = result.poiList.pois.slice(0, 5);
@@ -747,9 +1639,9 @@ async function fetchNearbySummary(placeSearch, lng, lat) {
                 const dir = getDirection(lng, lat, p.location);
                 return `${p.name}(${dir}${d})`;
             }).join('、');
-            resolve(`周边：${summary}`);
+            finish(`周边：${summary}`);
         });
-    });
+    }, signal, '');
 }
 
 function getDirection(centerLng, centerLat, loc) {
@@ -788,6 +1680,7 @@ function copyPrevLocation() {
 
 function updateExtensionPrompt() {
     if (!isExtensionEnabledForChat()) {
+        clearPreflightInjection();
         setExtensionPrompt(REALMAP_INJECT_KEY, '', extension_prompt_types.IN_CHAT, 0);
         return;
     }

@@ -5,6 +5,12 @@ import { Popup, POPUP_RESULT } from '../../../popup.js';
 import { createLayerController } from './layer-control.js';
 import { searchRankedPlaces, getRankedPoiLocation } from './place-search.js';
 import { isMobile } from '../../../RossAscends-mods.js';
+import {
+    addAmapRoutePolyline,
+    createAmapDestinationMarker,
+    fitMovingMapView,
+    getMovingRoutePosition,
+} from './map-state.js';
 
 let fsMap = null;
 let fsContainer = null;
@@ -456,23 +462,38 @@ function clearRedAndYellow() {
 }
 
 function setRedMarker(lng, lat) {
-    clearRedAndYellow();
-    fsMap.add(new window.AMap.Marker({
+    clearMarkerByTag('red');
+    const marker = new window.AMap.Marker({
         position: [lng, lat],
         icon: 'https://webapi.amap.com/theme/v1.3/markers/n/mark_r.png',
         anchor: 'bottom-center',
+        zIndex: 121,
         extData: { realmap: 'red' },
-    }));
+    });
+    fsMap.add(marker);
+    return marker;
 }
 
 function setYellowMarker(lng, lat) {
-    clearRedAndYellow();
-    fsMap.add(new window.AMap.Marker({
-        position: [lng, lat],
-        icon: 'https://webapi.amap.com/theme/v1.3/markers/n/mark_y.png',
-        anchor: 'bottom-center',
-        extData: { realmap: 'yellow' },
-    }));
+    clearMarkerByTag('yellow');
+    const marker = createAmapDestinationMarker(
+        window.AMap,
+        { lng, lat },
+        { extData: { realmap: 'yellow' } },
+    );
+    if (marker) fsMap.add(marker);
+    return marker;
+}
+
+function clearMarkerByTag(tag) {
+    if (!fsMap) return;
+    const overlays = fsMap.getAllOverlays();
+    overlays.forEach((overlay) => {
+        const markerTag = overlay?.CLASS_NAME === 'AMap.Marker'
+            ? overlay.getExtData?.()?.realmap
+            : '';
+        if (markerTag === tag) fsMap.remove(overlay);
+    });
 }
 
 function placeSelectionMarker(lng, lat) {
@@ -738,13 +759,25 @@ function drawFromState(state) {
         fsMap.setCenter([state.lng, state.lat]);
     } else if (state.mode === 'moving') {
         clearRedAndYellow();
-        if (state.from) setRedMarker(state.from.lng, state.from.lat);
-        if (state.to) setYellowMarker(state.to.lng, state.to.lat);
-        if (Array.isArray(state.polyline) && state.polyline.length) {
-            const poly = new AMap.Polyline({ path: state.polyline, strokeColor: '#00b0ff', strokeWeight: 3, strokeStyle: 'dashed' });
-            fsMap.add(poly);
-            fsMap.setFitView([poly]);
-        }
+        const currentPosition = getMovingRoutePosition(state);
+        const routeOverlays = addAmapRoutePolyline(
+            fsMap,
+            AMap,
+            state.polyline,
+            { progressRatio: state.progress_ratio },
+        );
+        const currentMarker = currentPosition
+            ? setRedMarker(currentPosition.lng, currentPosition.lat)
+            : null;
+        const destinationMarker = state.to
+            ? setYellowMarker(state.to.lng, state.to.lat)
+            : null;
+        fitMovingMapView(
+            fsMap,
+            [...routeOverlays, currentMarker, destinationMarker],
+            currentPosition,
+            [80, 60, 80, 60],
+        );
     }
 }
 

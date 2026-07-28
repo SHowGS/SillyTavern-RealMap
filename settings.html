@@ -7,6 +7,17 @@
         <div class="inline-drawer-content">
             <small>接入高德地图 JS API 2.0，为角色扮演注入真实地理位置、天气、路线与 POI 上下文。请在 https://console.amap.com/dev/key 申请 Key 与安全密钥。</small>
 
+            <div class="realmap_version_row">
+                <div class="realmap_version_info">
+                    <span>版本</span>
+                    <span id="realmap_version_value" aria-live="polite">正在检查...</span>
+                </div>
+                <button class="menu_button" id="realmap_update_btn" type="button" disabled>
+                    <i class="fa-solid fa-download fa-fw"></i>
+                    <span>更新</span>
+                </button>
+            </div>
+
             <hr>
 
             <!-- 启用现实地图（仅当有聊天打开时显示） -->
@@ -26,7 +37,7 @@
                 <hr>
 
                 <b>LLM API 配置</b>
-                <small>用于扩展自身的地点描述生成 / 解析调用（OpenAI 兼容接口）。</small>
+                <small>用于主模型回复前的移动意图判断，以及回复后的最终位置解析（OpenAI兼容接口）。</small>
 
                 <label for="realmap_llm_source">API 类型</label>
                 <select id="realmap_llm_source" class="text_pole">

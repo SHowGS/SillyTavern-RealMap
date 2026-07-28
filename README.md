@@ -10,6 +10,10 @@
 
 - 监听每轮AI消息完成事件，读取上一轮位置、相关用户消息和AI正文。
 - 支持OpenAI、OpenRouter、DeepSeek及自定义OpenAI兼容接口。
+- LLM使用结构化父子地点描述，区分城市、父场所、楼宇/院区/入口等子地点和地点类型。
+- 院区、校区、分院和本部限定词会被强制保留；LLM遗漏限定词时，会从本轮剧情中的明确完整地名恢复。
+- 剧情定位使用父子POI、类型兼容和位置连续性分层解析；距离只在同一语义层级内参与排序。
+- 用户消息发送后、主LLM生成前会进行一次移动意图判断；命中时把高德返回的多种路线、距离、预计时间和关键路径作为临时system上下文。
 - 支持两类位置结果：
   - `idle`：角色停留在某个地点，经高德地理编码后保存坐标、格式化地址和周边POI摘要。
   - `moving`：角色正在移动，经高德驾车、步行、骑行或公交路线服务解析后保存起终点、距离、时长和路线折线。
@@ -40,7 +44,7 @@
 
 ### 聊天状态与回档
 
-- 启用状态按聊天保存在`chat_metadata.realmap_enabled`。
+- 启用状态按聊天保存在`chat_metadata.realmap_enabled`，明确禁用后会长期保持，刷新或重新进入聊天不会再次询问；只有从未选择过启用状态的聊天才会询问。
 - 每条AI消息的位置保存在`message.extra.realmap`，并同步到当前`swipe_info[swipe_id].extra`。
 - 删除消息、切换swipe和从历史楼层继续聊天时，位置会随SillyTavern原生消息状态一起变化。
 - 打开带有历史位置的聊天时，扩展会从最近一条AI消息恢复地图状态。
@@ -100,9 +104,24 @@ git clone https://github.com/SHowGS/SillyTavern-RealMap.git
 - `DEFAULT_SYSTEM_PROMPT`：system提示词
 - `DEFAULT_ASSISTANT_REPLY`：assistant确认回复
 - `CONTEXT_PROMPT_TEMPLATE`：user上下文模板
-- `DEFAULT_ASSISTANT_PREFILL`：末尾assistant预填充，默认内容为`{`
 
-实际请求顺序为`system→assistant→user→assistant预填充`。扩展设置页不提供提示词编辑功能，修改`prompts.js`后重载页面即可生效。旧版浏览器设置中的提示词字段会被清理，不会覆盖源码。
+两类插件LLM请求的顺序均为`system→assistant→user`，没有assistant预填充。扩展设置页不提供提示词编辑功能，修改`prompts.js`后重载页面即可生效。旧版浏览器设置中的提示词字段会被清理，不会覆盖源码。
+
+发送给插件LLM的用户与AI正文会套用SillyTavern当前生效的提示词正则，包括已获准的全局、角色和预设正则；处理仅作用于请求上下文，不会改写聊天原文。
+
+插件LLM请求的输出上限统一为65536tokens。响应解析会从思考文本、代码块或说明文字中截取完整JSON对象，并优先采用最后一个包含`action`字段的对象。
+
+新版地点字段使用以下结构，同时继续兼容旧版字符串：
+
+```json
+{
+  "full": "成都市第二人民医院门诊楼",
+  "city": "成都市",
+  "parent": "成都市第二人民医院",
+  "subplace": "门诊楼",
+  "kind": "building"
+}
+```
 
 ## 数据格式
 
@@ -117,7 +136,12 @@ git clone https://github.com/SHowGS/SillyTavern-RealMap.git
   "lat": 39.908,
   "label": "北京市东城区天安门",
   "poi": true,
-  "nearby": "周边：天安门(北120m)"
+  "nearby": "周边：天安门(北120m)",
+  "resolution": {
+    "strategy": "exact-child",
+    "confidence": "high",
+    "resolved_name": "天安门"
+  }
 }
 ```
 
@@ -140,19 +164,43 @@ git clone https://github.com/SHowGS/SillyTavern-RealMap.git
   },
   "route_mode": "walking",
   "duration_min": 18,
+  "elapsed_min": 6,
+  "progress_ratio": 0.3333,
   "distance": 1400,
   "polyline": []
+}
+```
+
+`duration_min`是高德路线预计总时长，`elapsed_min`是位置推断LLM从本轮正文分析出的剧情经过时间，`progress_ratio`用于把moving状态的当前位置推进到路线对应位置。
+
+前置路线信息保存在发起移动的用户消息`extra.realmap_preflight`中，用于重新生成和切换回复时复用；该信息不会直接修改当前位置：
+
+```json
+{
+  "v": 1,
+  "captured_at": 1750000000000,
+  "from": {"label": "成都东站", "lng": 104.141, "lat": 30.629},
+  "to": {"label": "成都市第二人民医院龙潭院区", "lng": 104.185, "lat": 30.689},
+  "routes": [
+    {
+      "mode": "transfer",
+      "distance_m": 8200,
+      "duration_min": 35,
+      "key_steps": ["地铁8号线（东大路站→十里店站）"]
+    }
+  ]
 }
 ```
 
 ## 隐私与行为边界
 
 - 高德Key和LLM API Key保存在SillyTavern扩展设置中。
-- 启用位置推断后，扩展会将相关对话正文、上一轮位置和源码提示词发送到所配置的LLM服务。
+- 启用位置推断后，扩展会在用户发送后和AI回复后分别调用一次所配置的LLM服务；前置调用没有移动意图时不会继续请求地图路线。
+- 用户点击停止生成时，会同时取消插件正在执行的前置判断、回复后判断、地点解析、路线和周边查询；取消后的结果不会写入位置状态。
 - 地图搜索、地理编码、周边POI和路线请求会发送到高德地图服务。
 - “前往此处”仅填写输入框，不会自动发送消息。
 - “设置此地为当前位置”会在确认后修改最近一条AI消息的`extra.realmap`。
-- 当前版本会在每次LLM请求结束后显示调试弹窗，其中包含请求消息、原始输出或错误信息。
+- AI回复后会显示合并调试弹窗，依次包含正文前信息补充LLM和输出后位置推断LLM的请求消息、65536tokens输出上限、HTTP状态、请求ID、响应模型、`finish_reason`、`usage`、完整API响应、LLM原始输出和JSON解析结果。
 
 ## 要求
 
@@ -170,26 +218,28 @@ manifest.json        # 扩展清单
 settings.html        # API配置和启用控制
 style.css            # 小窗、全屏、路线面板和移动端样式
 index.js             # 初始化、聊天事件、LLM推断、位置解析和提示词注入
-prompts.js           # system、assistant、user上下文及末尾预填充
+prompts.js           # system、assistant确认和user上下文
+preflight-route.js   # 回复前移动意图规范化、路线查询和上下文格式化
 amap.js              # 高德JS API加载与连接测试
 state.js             # 聊天元数据、消息位置、窗口位置和坐标工具
 minimap.js           # 桌面小窗与移动端悬浮球
 fullscreen.js        # 全屏地图、搜索、地点操作和路线预览
 layer-control.js     # 标准、卫星及路网图层控制
-place-search.js      # 全国/附近地点搜索、候选去重和统一评分
+place-search.js      # 手动搜索排序与剧情父子POI层级解析
 ```
 
 ## Roadmap
 
 - [x] 按聊天启用、禁用及历史位置清理
 - [x] 独立LLM位置推断
+- [x] 主LLM回复前的移动路线信息补充
 - [x] `idle`和`moving`位置解析
 - [x] 位置与周边POI上下文注入
 - [x] 桌面地图小窗和移动端悬浮球
 - [x] 浏览器全屏地图、地点搜索和手动位置覆盖
 - [x] 标准/卫星底图与路网叠加
 - [x] 驾车、步行、骑行和公交路线预览
-- [x] 用户搜索与LLM位置解析共用地点搜索和评分
+- [x] 手动地点搜索与剧情父子POI层级解析
 - [ ] Slash命令
 - [ ] 更完整的错误恢复与无位置状态提示
 - [ ] 设置面板国际化

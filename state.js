@@ -1,10 +1,12 @@
 import { extension_settings, getContext, saveMetadataDebounced } from '../../../extensions.js';
 import { chat_metadata, saveMetadata } from '../../../../script.js';
+import { CHAT_ENABLE_META_KEY, getStoredChatEnableState } from './chat-enable-state.js';
+import { getMovingRoutePosition } from './map-state.js';
 
 export { extension_settings, chat_metadata };
 
 export const MODULE_NAME = 'realmap';
-const META_ENABLED = 'realmap_enabled';
+const META_ENABLED = CHAT_ENABLE_META_KEY;
 const META_STATE = 'realmap_state';
 const LOC_KEYS = {
     x: 'realmap_window_x',
@@ -35,7 +37,11 @@ export function ensureBaseSettings() {
 }
 
 export function isExtensionEnabledForChat() {
-    return Boolean(chat_metadata[META_ENABLED]);
+    return getExtensionEnabledStateForChat() === true;
+}
+
+export function getExtensionEnabledStateForChat() {
+    return getStoredChatEnableState(chat_metadata);
 }
 
 export function setExtensionEnabledForChat(on, { immediate = false } = {}) {
@@ -71,6 +77,9 @@ export function clearAllChatLocations() {
         for (const m of chat) {
             if (m?.extra?.realmap) {
                 delete m.extra.realmap;
+            }
+            if (m?.extra?.realmap_preflight) {
+                delete m.extra.realmap_preflight;
             }
         }
     }
@@ -149,6 +158,6 @@ export function getCurrentPosition() {
     const s = getChatState();
     if (!s) return null;
     if (typeof s.lng === 'number' && typeof s.lat === 'number') return { lng: s.lng, lat: s.lat };
-    if (s.mode === 'moving' && s.from) return { lng: s.from.lng, lat: s.from.lat };
+    if (s.mode === 'moving' && s.from) return getMovingRoutePosition(s);
     return null;
 }

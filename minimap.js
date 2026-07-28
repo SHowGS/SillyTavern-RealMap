@@ -3,6 +3,12 @@ import { ensureBaseSettings, findLastAiMessage, getChatState, saveWindowPos, loa
 import { openFullscreen } from './fullscreen.js';
 import { createLayerController } from './layer-control.js';
 import { isMobile } from '../../../RossAscends-mods.js';
+import {
+    addAmapRoutePolyline,
+    createAmapDestinationMarker,
+    fitMovingMapView,
+    getMovingRoutePosition,
+} from './map-state.js';
 
 const WIDGET_ID = 'realmap_minimap';
 const DEFAULT_W = 320;
@@ -205,16 +211,22 @@ async function renderStateOnMap(map, state) {
         map.add(marker);
         map.setCenter([state.lng, state.lat]);
     } else if (state.mode === 'moving' && state.from && state.to) {
-        const fromM = new AMap.Marker({ position: [state.from.lng, state.from.lat], icon: 'https://webapi.amap.com/theme/v1.3/markers/n/mark_b.png', anchor: 'bottom-center' });
-        const toM = new AMap.Marker({ position: [state.to.lng, state.to.lat], icon: 'https://webapi.amap.com/theme/v1.3/markers/n/mark_y.png', anchor: 'bottom-center' });
-        map.add([fromM, toM]);
-        if (Array.isArray(state.polyline) && state.polyline.length) {
-            const poly = new AMap.Polyline({ path: state.polyline, strokeColor: '#00b0ff', strokeWeight: 3, strokeStyle: 'dashed' });
-            map.add(poly);
-            map.setFitView([poly]);
-        } else {
-            map.setFitView([fromM, toM]);
-        }
+        const currentPosition = getMovingRoutePosition(state);
+        const routeOverlays = addAmapRoutePolyline(
+            map,
+            AMap,
+            state.polyline,
+            { progressRatio: state.progress_ratio },
+        );
+        const fromM = new AMap.Marker({
+            position: [currentPosition.lng, currentPosition.lat],
+            icon: 'https://webapi.amap.com/theme/v1.3/markers/n/mark_r.png',
+            anchor: 'bottom-center',
+            zIndex: 121,
+        });
+        const toM = createAmapDestinationMarker(AMap, state.to);
+        map.add([fromM, toM].filter(Boolean));
+        fitMovingMapView(map, [...routeOverlays, fromM, toM], currentPosition, [28, 28, 28, 28]);
     }
 }
 

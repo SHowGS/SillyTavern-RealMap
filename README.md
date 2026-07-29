@@ -246,4 +246,4 @@ place-search.js      # 手动搜索排序与剧情父子POI层级解析
 
 ## License
 
-本项目采用MIT许可证，详见[LICENSE](LICENSE)。
+本项目采用[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0)，详见[LICENSE](LICENSE)。未经授权禁止将本项目用于商业用途；如需商业授权，请联系作者。

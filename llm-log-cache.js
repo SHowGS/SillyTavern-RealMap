@@ -6,6 +6,29 @@ export const PLUGIN_LLM_LOG_STAGES = Object.freeze({
     POSTFLIGHT: 'postflight',
 });
 
+export function formatMainLlmInjectionLog({
+    key = '',
+    position = '',
+    depth = 0,
+    role = '',
+    scan = false,
+    text = '',
+} = {}) {
+    const injectedText = String(text ?? '');
+    return [
+        '=== 主LLM注入信息 ===',
+        `注入键：${String(key) || '未指定'}`,
+        `注入位置：${String(position) || '未指定'}`,
+        `注入深度：${Number.isFinite(Number(depth)) ? Number(depth) : '未指定'}`,
+        `注入角色：${String(role) || '未指定'}`,
+        `参与世界信息扫描：${scan ? '是' : '否'}`,
+        `原文字符数：${injectedText.length}`,
+        '',
+        '=== 注入给主LLM的位置信息原文 ===',
+        injectedText || '（空）',
+    ].join('\n');
+}
+
 function hashText(value) {
     const text = String(value ?? '');
     let hash = 2166136261;

@@ -6,10 +6,31 @@
 
 #realmap_enable_btn,
 #realmap_test_connection,
+#realmap_amap_key_link,
 #realmap_llm_refresh_models,
 #realmap_log_btn,
 #realmap_update_btn {
     white-space: nowrap;
+}
+
+.realmap_amap_actions {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+}
+
+.realmap_amap_actions > .menu_button {
+    display: inline-flex;
+    flex: 1 1 0;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    margin: 0;
+}
+
+#realmap_amap_key_link {
+    color: inherit;
+    text-decoration: none;
 }
 
 .realmap_version_actions {

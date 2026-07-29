@@ -5,7 +5,7 @@
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
-            <small>接入高德地图 JS API 2.0，为角色扮演注入真实地理位置、天气、路线与 POI 上下文。请在 https://console.amap.com/dev/key 申请 Key 与安全密钥。</small>
+            <small>接入高德地图 JS API 2.0，为角色扮演注入真实地理位置、天气、路线与 POI 上下文。请通过下方链接申请 Key 与安全密钥。</small>
 
             <div class="realmap_version_row">
                 <div class="realmap_version_info">
@@ -38,7 +38,20 @@
                 <label for="realmap_security_code">安全密钥 (securityJsCode)</label>
                 <input id="realmap_security_code" class="text_pole" type="password" autocomplete="off" placeholder="securityJsCode" />
 
-                <div class="menu_button" id="realmap_test_connection">测试连接</div>
+                <div class="realmap_amap_actions">
+                    <a
+                        class="menu_button"
+                        id="realmap_amap_key_link"
+                        href="https://console.amap.com/dev/key"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="在新标签页打开高德开放平台控制台"
+                    >
+                        <i class="fa-solid fa-arrow-up-right-from-square fa-fw"></i>
+                        <span>获取高德API Key</span>
+                    </a>
+                    <div class="menu_button" id="realmap_test_connection">测试连接</div>
+                </div>
 
                 <hr>
 

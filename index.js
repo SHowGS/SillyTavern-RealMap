@@ -14,6 +14,7 @@ import {
 } from './llm-response.js';
 import {
     PLUGIN_LLM_LOG_STAGES,
+    formatMainLlmInjectionLog,
     getPluginLlmLogStage,
     getPluginLlmRoundKey,
     mergePluginLlmLogStage,
@@ -430,7 +431,7 @@ function markPreflightLifecycle(stage, detail = '') {
     };
 }
 
-function updatePreflightPipelineResult(roundKey, resultText) {
+function updatePreflightPipelineResult(roundKey, resultText, details = '') {
     const report = getCachedPluginLlmLogStage(
         roundKey,
         PLUGIN_LLM_LOG_STAGES.PREFLIGHT,
@@ -443,7 +444,11 @@ function updatePreflightPipelineResult(roundKey, resultText) {
     cachePluginLlmLogStage(
         roundKey,
         PLUGIN_LLM_LOG_STAGES.PREFLIGHT,
-        `${withoutPreviousResult}\n\n=== 前置流程结果 ===\n${resultText}`,
+        [
+            withoutPreviousResult,
+            `=== 前置流程结果 ===\n${resultText}`,
+            String(details ?? '').trim(),
+        ].filter(Boolean).join('\n\n'),
     );
 }
 
@@ -1406,6 +1411,14 @@ async function runPreflightForUserMessage(chat, message) {
     updatePreflightPipelineResult(
         roundKey,
         `已向主LLM注入地图路线信息，共${context.length}字符，包含${routes.length}种出行方案。`,
+        formatMainLlmInjectionLog({
+            key: REALMAP_PREFLIGHT_INJECT_KEY,
+            position: 'IN_CHAT（聊天上下文）',
+            depth: 0,
+            role: 'SYSTEM',
+            scan: false,
+            text: context,
+        }),
     );
 
     console.debug('[realmap] preflight route context', metadata);

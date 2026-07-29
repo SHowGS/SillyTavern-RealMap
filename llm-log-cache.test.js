@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
     PLUGIN_LLM_LOG_STORAGE_KEY,
     PLUGIN_LLM_LOG_STAGES,
+    formatMainLlmInjectionLog,
     getPluginLlmLogStage,
     getPluginLlmRoundKey,
     mergePluginLlmLogStage,
@@ -19,6 +20,26 @@ function createStorage() {
         setItem: (key, value) => values.set(key, value),
     };
 }
+
+test('formats the exact main LLM injection text and placement metadata', () => {
+    const text = '[现实地图·本轮移动参考]\n起点：医院\n目的地：车站';
+    const report = formatMainLlmInjectionLog({
+        key: 'realmapPreflightContext',
+        position: 'IN_CHAT（聊天上下文）',
+        depth: 0,
+        role: 'SYSTEM',
+        scan: false,
+        text,
+    });
+
+    assert.match(report, /注入键：realmapPreflightContext/u);
+    assert.match(report, /注入位置：IN_CHAT（聊天上下文）/u);
+    assert.match(report, /注入深度：0/u);
+    assert.match(report, /注入角色：SYSTEM/u);
+    assert.match(report, /参与世界信息扫描：否/u);
+    assert.match(report, new RegExp(`原文字符数：${text.length}`, 'u'));
+    assert.ok(report.endsWith(text));
+});
 
 test('stores the latest round reports in browser storage', () => {
     const storage = createStorage();

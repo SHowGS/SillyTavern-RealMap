@@ -3,13 +3,15 @@ import assert from 'node:assert/strict';
 
 import {
     ALL_ROUTE_MODES,
-    PreflightEventGate,
+    PreflightGroupState,
     formatPreflightContext,
+    getUnansweredUserMessage,
     getRouteModes,
     normalizePreflightIntent,
     queryRouteOptions,
-    shouldArmPreflightGeneration,
     shouldRunFreshPreflightAtStart,
+    shouldRunPreflightAfterCommands,
+    shouldRunPreflightForSentMessage,
     summarizeRouteResult,
 } from './preflight-route.js';
 
@@ -100,40 +102,79 @@ function createFakeAMap({
     };
 }
 
-test('arms only one preflight for a normal manual user message', () => {
-    const gate = new PreflightEventGate();
-    assert.equal(gate.arm({
+test('runs preflight for every real user MESSAGE_SENT event', () => {
+    assert.equal(shouldRunPreflightForSentMessage({
+        is_user: true,
+        is_system: false,
+    }), true);
+    assert.equal(shouldRunPreflightForSentMessage({
+        is_user: false,
+        is_system: false,
+    }), false);
+    assert.equal(shouldRunPreflightForSentMessage({
+        is_user: true,
+        is_system: true,
+    }), false);
+    assert.equal(shouldRunPreflightForSentMessage(null), false);
+});
+
+test('starts preflight before a normal pending user message is inserted', () => {
+    assert.equal(shouldRunPreflightAfterCommands({
         type: 'normal',
-        automaticTrigger: false,
-        dryRun: false,
         userText: '前往龙潭院区',
     }), true);
-    assert.equal(gate.consume(true), true);
-    assert.equal(gate.consume(true), false);
-
-    assert.equal(shouldArmPreflightGeneration({
-        type: 'regenerate',
-        userText: '前往龙潭院区',
-    }), false);
-    assert.equal(shouldArmPreflightGeneration({
+    assert.equal(shouldRunPreflightAfterCommands({
         type: 'normal',
-        automaticTrigger: true,
-        userText: '前往龙潭院区',
+        userText: '',
     }), false);
-    assert.equal(shouldArmPreflightGeneration({
+    assert.equal(shouldRunPreflightAfterCommands({
         type: 'normal',
+        userText: '前往龙潭院区',
         dryRun: true,
+    }), false);
+    assert.equal(shouldRunPreflightAfterCommands({
+        type: 'normal',
+        userText: '前往龙潭院区',
+        automaticTrigger: true,
+    }), false);
+    assert.equal(shouldRunPreflightAfterCommands({
+        type: 'normal',
+        userText: '前往龙潭院区',
+        groupActive: true,
+    }), false);
+    assert.equal(shouldRunPreflightAfterCommands({
+        type: 'regenerate',
         userText: '前往龙潭院区',
     }), false);
 });
 
-test('tracks group lifecycle without arming duplicate messages', () => {
-    const gate = new PreflightEventGate();
-    gate.startGroup();
-    assert.equal(gate.groupActive, true);
-    assert.equal(gate.consume(true), false);
-    gate.finishGroup();
-    assert.equal(gate.groupActive, false);
+test('finds a user message that was inserted before normal generation starts', () => {
+    const unanswered = {
+        is_user: true,
+        is_system: false,
+        mes: '前往龙潭院区',
+    };
+    assert.equal(getUnansweredUserMessage([
+        { is_user: false, is_system: false, mes: '上一轮回复' },
+        unanswered,
+    ]), unanswered);
+    assert.equal(getUnansweredUserMessage([
+        unanswered,
+        { is_user: false, is_system: false, mes: '已有回复' },
+    ]), null);
+    assert.equal(getUnansweredUserMessage([
+        unanswered,
+        { is_user: false, is_system: true, mes: '隐藏系统消息' },
+    ]), unanswered);
+    assert.equal(getUnansweredUserMessage(null), null);
+});
+
+test('tracks group lifecycle', () => {
+    const state = new PreflightGroupState();
+    state.startGroup();
+    assert.equal(state.groupActive, true);
+    state.finishGroup();
+    assert.equal(state.groupActive, false);
 });
 
 test('runs a fresh preflight for regeneration without duplicating group members', () => {

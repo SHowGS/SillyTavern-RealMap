@@ -18,8 +18,11 @@ function hashText(value) {
 
 export function getPluginLlmRoundKey(message) {
     if (!message || typeof message !== 'object') return '';
-    const timestamp = message.send_date ?? message.gen_id ?? '';
-    return `${String(timestamp)}:${hashText(message.mes)}`;
+    const sendDate = String(message.send_date ?? '').trim();
+    if (sendDate) return `sent:${sendDate}`;
+    const generationId = String(message.gen_id ?? '').trim();
+    if (generationId) return `generated:${generationId}`;
+    return `message:${hashText(message.mes)}`;
 }
 
 export function createPluginLlmLog(reports, capturedAt = Date.now()) {

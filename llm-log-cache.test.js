@@ -83,6 +83,22 @@ test('merges both plugin calls by a stable user-message round key', () => {
     );
 });
 
+test('round key stays stable when prompt regex changes message text', () => {
+    const original = {
+        send_date: '2026-07-28T15:00:00.123Z',
+        mes: '前往龙潭院区',
+    };
+    const regexed = {
+        ...original,
+        mes: '前往成都市第二人民医院龙潭院区',
+    };
+
+    assert.equal(
+        getPluginLlmRoundKey(regexed),
+        getPluginLlmRoundKey(original),
+    );
+});
+
 test('a new user-message round cannot inherit the previous preflight report', () => {
     const first = mergePluginLlmLogStage(null, {
         roundKey: 'round-1',

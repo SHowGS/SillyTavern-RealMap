@@ -28,18 +28,6 @@ const ROUTE_MODE_ALIASES = Object.freeze({
     transfer: 'transfer',
 });
 
-export function shouldArmPreflightGeneration({
-    type,
-    automaticTrigger = false,
-    dryRun = false,
-    userText = '',
-} = {}) {
-    return !dryRun
-        && !automaticTrigger
-        && (type === undefined || type === 'normal')
-        && Boolean(String(userText).trim());
-}
-
 export function shouldRunFreshPreflightAtStart({
     type,
     groupActive = false,
@@ -47,35 +35,45 @@ export function shouldRunFreshPreflightAtStart({
     return !groupActive && ['regenerate', 'swipe'].includes(type);
 }
 
-export class PreflightEventGate {
+export function shouldRunPreflightAfterCommands({
+    type,
+    automaticTrigger = false,
+    dryRun = false,
+    groupActive = false,
+    userText = '',
+} = {}) {
+    return !dryRun
+        && !automaticTrigger
+        && !groupActive
+        && [undefined, 'normal'].includes(type)
+        && Boolean(String(userText).trim());
+}
+
+export function shouldRunPreflightForSentMessage(message) {
+    return Boolean(message?.is_user && !message?.is_system);
+}
+
+export function getUnansweredUserMessage(chat) {
+    if (!Array.isArray(chat)) return null;
+    const lastVisible = [...chat]
+        .reverse()
+        .find(message => message
+            && !message.is_system
+            && typeof message.mes === 'string');
+    return lastVisible?.is_user ? lastVisible : null;
+}
+
+export class PreflightGroupState {
     constructor() {
-        this.armed = false;
         this.groupActive = false;
-    }
-
-    arm(options) {
-        this.armed = shouldArmPreflightGeneration(options);
-        return this.armed;
-    }
-
-    consume(isUserMessage) {
-        const shouldRun = this.armed && Boolean(isUserMessage);
-        this.armed = false;
-        return shouldRun;
-    }
-
-    disarm() {
-        this.armed = false;
     }
 
     startGroup() {
         this.groupActive = true;
-        this.disarm();
     }
 
     finishGroup() {
         this.groupActive = false;
-        this.disarm();
     }
 }
 

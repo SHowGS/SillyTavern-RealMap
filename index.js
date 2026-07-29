@@ -44,11 +44,14 @@ import {
 import { searchRankedPlaces, getRankedPoiLocation, normalizePlaceIntent, refinePlaceIntentFromNarrative, resolveNarrativePlace } from './place-search.js';
 import {
     PREFLIGHT_TOTAL_TIMEOUT_MS,
-    PreflightEventGate,
+    PreflightGroupState,
     formatPreflightContext,
+    getUnansweredUserMessage,
     normalizePreflightIntent,
     queryRouteOptions,
     shouldRunFreshPreflightAtStart,
+    shouldRunPreflightAfterCommands,
+    shouldRunPreflightForSentMessage,
 } from './preflight-route.js';
 import { formatVersionLabel, getUpdateButtonPresentation } from './version-state.js';
 
@@ -62,6 +65,7 @@ const MIN_INFERENCE_PLACE_SCORE = 80;
 const VERSION_CHECK_TIMEOUT_MS = 60_000;
 const EXTENSION_UPDATE_TIMEOUT_MS = 120_000;
 const PLUGIN_CALL_CANCELLED = Symbol('realmapPluginCallCancelled');
+const PREFLIGHT_RUNTIME_BUILD = 'pre-main-barrier-20260729-2';
 
 let chatChangedTimer = null;
 let chatChangedRunning = false;
@@ -69,11 +73,18 @@ let chatChangedPending = false;
 let llmAbortController = null;
 let preflightAbortController = null;
 let preflightRunId = 0;
-const preflightEventGate = new PreflightEventGate();
+const preflightGroupState = new PreflightGroupState();
+let pendingPreflightAttempt = null;
+let preflightAttemptSequence = 0;
 let postflightAbortController = null;
 let postflightRunId = 0;
 let extensionUpdateInProgress = false;
 let latestPluginLlmLogInMemory = null;
+let preflightLifecycle = {
+    stage: 'module_loaded',
+    capturedAt: Date.now(),
+    detail: '',
+};
 
 /**
  * @typedef {Object} RealMapSettings
@@ -340,6 +351,10 @@ function cachePluginLlmLogStage(roundKey, stage, report) {
         );
         console.warn('[realmap] failed to cache plugin LLM stage in browser', error);
     }
+    if (stage === PLUGIN_LLM_LOG_STAGES.PREFLIGHT
+        && pendingPreflightAttempt?.roundKey === roundKey) {
+        pendingPreflightAttempt.report = String(report ?? '').trim();
+    }
 }
 
 function getLatestPluginLlmLog() {
@@ -359,8 +374,55 @@ function createMissingPreflightDebugReport() {
     return [
         '################ 正文前信息补充LLM ################',
         '=== 状态 ===',
-        '本轮未捕获第一次调用报告。可能是旧消息重新生成时缺少前置缓存、前置流程未进入、在请求报告生成前被取消，或缺少高德Key。',
+        '本轮未收到第一次调用报告。',
+        '=== 运行诊断 ===',
+        `运行构建：${PREFLIGHT_RUNTIME_BUILD}`,
+        `最后阶段：${preflightLifecycle.stage}`,
+        `阶段时间：${new Date(preflightLifecycle.capturedAt).toLocaleString()}`,
+        preflightLifecycle.detail ? `阶段信息：${preflightLifecycle.detail}` : '',
     ].join('\n\n');
+}
+
+function createUnavailablePreflightDebugReport(reasons) {
+    return [
+        '################ 正文前信息补充LLM ################',
+        '=== 状态 ===',
+        '第一次调用未发送。',
+        '=== 原因 ===',
+        reasons.join('\n'),
+        '=== 前置流程结果 ===',
+        '本轮未向主LLM注入地图路线信息。',
+    ].join('\n\n');
+}
+
+function createStartedPreflightDebugReport() {
+    return [
+        '################ 正文前信息补充LLM ################',
+        '=== 状态 ===',
+        'MESSAGE_SENT事件已进入前置流程，正在请求第一次插件LLM调用。',
+    ].join('\n\n');
+}
+
+function createFailedPreflightDebugReport(source, error) {
+    return [
+        '################ 正文前信息补充LLM ################',
+        '=== 状态 ===',
+        '第一次调用在前置屏障内发生异常，主LLM已放行。',
+        '=== 运行诊断 ===',
+        `运行构建：${PREFLIGHT_RUNTIME_BUILD}`,
+        `入口：${source}`,
+        `错误：${error?.stack || error?.message || String(error)}`,
+        '=== 前置流程结果 ===',
+        '本轮未向主LLM注入地图路线信息。',
+    ].join('\n\n');
+}
+
+function markPreflightLifecycle(stage, detail = '') {
+    preflightLifecycle = {
+        stage,
+        capturedAt: Date.now(),
+        detail: String(detail ?? ''),
+    };
 }
 
 function updatePreflightPipelineResult(roundKey, resultText) {
@@ -574,6 +636,7 @@ export async function init() {
     eventSource.on(event_types.MESSAGE_DELETED, debouncedOnChatChanged);
     eventSource.on(event_types.MESSAGE_EDITED, debouncedOnChatChanged);
     eventSource.makeLast(event_types.CHARACTER_MESSAGE_RENDERED, onAiMessage);
+    markPreflightLifecycle('listeners_registered');
     onChatChanged();
     $('#realmap_enable_btn').on('click', () => void handleEnableFromSettings());
     console.debug('[realmap] initialized');
@@ -601,13 +664,12 @@ function clearLocationInjection() {
     );
 }
 
-function cancelPreflightWork({ clearInjection = true, disarm = true } = {}) {
+function cancelPreflightWork({ clearInjection = true } = {}) {
     preflightRunId += 1;
     if (preflightAbortController) {
         preflightAbortController.abort();
         preflightAbortController = null;
     }
-    if (disarm) preflightEventGate.disarm();
     if (clearInjection) clearPreflightInjection();
 }
 
@@ -673,51 +735,178 @@ function getLatestUserMessage(chat = getContext()?.chat) {
     return [...chat].reverse().find(item => item?.is_user && !item?.is_system) || null;
 }
 
-async function onPreflightGenerationStarted(type, _params, dryRun) {
+function createPendingPreflightMessage(chat, userText) {
+    const pendingMessage = {
+        is_user: true,
+        is_system: false,
+        mes: userText,
+        send_date: `realmap-preflight-${Date.now()}-${++preflightAttemptSequence}`,
+    };
+    trackPendingPreflightAttempt(chat, pendingMessage, false);
+    return pendingMessage;
+}
+
+function trackPendingPreflightAttempt(chat, message, bound = true) {
+    const roundKey = getPluginLlmRoundKey(message);
+    pendingPreflightAttempt = {
+        chat,
+        roundKey,
+        boundRoundKey: bound ? roundKey : '',
+        report: '',
+    };
+    return pendingPreflightAttempt;
+}
+
+function hasCompletedPreflightForMessage(chat, message) {
+    const pending = pendingPreflightAttempt;
+    if (!pending || pending.chat !== chat || !pending.report || !message) return false;
+    const roundKey = getPluginLlmRoundKey(message);
+    return roundKey === (pending.boundRoundKey || pending.roundKey);
+}
+
+async function onPreflightGenerationStarted(type, params, dryRun) {
     if (dryRun) return;
+    markPreflightLifecycle(
+        'generation_started',
+        `type=${String(type)},groupActive=${preflightGroupState.groupActive}`,
+    );
     if (!isExtensionEnabledForChat()) {
         deactivateCurrentChatRuntime();
         return;
     }
+    const chat = getContext()?.chat;
+    const unansweredUserMessage = getUnansweredUserMessage(chat);
+    const canReuseCompletedBarrier = !params?.automatic_trigger
+        && [undefined, 'normal'].includes(type)
+        && hasCompletedPreflightForMessage(chat, unansweredUserMessage);
     cancelPostflightWork({ detach: true });
+    if (canReuseCompletedBarrier) {
+        markPreflightLifecycle(
+            'generation_started_barrier_reused',
+            `roundKey=${getPluginLlmRoundKey(unansweredUserMessage)}`,
+        );
+        return;
+    }
+    if (!preflightGroupState.groupActive) {
+        pendingPreflightAttempt = null;
+    }
     const isReuseGeneration = type === 'regenerate' || type === 'swipe';
     if (isReuseGeneration) {
         if (!shouldRunFreshPreflightAtStart({
             type,
-            groupActive: preflightEventGate.groupActive,
+            groupActive: preflightGroupState.groupActive,
         })) return;
         cancelPreflightWork();
-        const ctx = getContext();
-        const chat = ctx?.chat;
         const message = getLatestUserMessage(chat);
         if (message) {
-            await runPreflightForUserMessage(chat, message);
+            await runPreflightSafely(chat, message, 'GENERATION_STARTED');
         }
         return;
     }
 
     const hasPendingUserText = (type === undefined || type === 'normal')
         && Boolean(String($('#send_textarea').val() ?? '').trim());
-    if (!preflightEventGate.groupActive || hasPendingUserText || ![undefined, 'normal'].includes(type)) {
+    if (!preflightGroupState.groupActive || hasPendingUserText || ![undefined, 'normal'].includes(type)) {
         cancelPreflightWork();
+    }
+    const userText = String($('#send_textarea').val() ?? '');
+    const shouldRunFromTextarea = shouldRunPreflightAfterCommands({
+        type,
+        automaticTrigger: params?.automatic_trigger,
+        dryRun,
+        groupActive: preflightGroupState.groupActive,
+        userText,
+    });
+    if (!Array.isArray(chat)) return;
+    if (shouldRunFromTextarea) {
+        const pendingMessage = createPendingPreflightMessage(chat, userText);
+        await runPreflightSafely(chat, pendingMessage, 'GENERATION_STARTED');
+        return;
+    }
+    const shouldRunFromInsertedMessage = !params?.automatic_trigger
+        && !preflightGroupState.groupActive
+        && [undefined, 'normal'].includes(type)
+        && Boolean(unansweredUserMessage);
+    if (shouldRunFromInsertedMessage) {
+        trackPendingPreflightAttempt(chat, unansweredUserMessage);
+        await runPreflightSafely(
+            chat,
+            unansweredUserMessage,
+            'GENERATION_STARTED_INSERTED_MESSAGE',
+        );
     }
 }
 
-function onPreflightGenerationAfterCommands(type, params, dryRun) {
+async function onPreflightGenerationAfterCommands(type, params, dryRun) {
+    if (dryRun) return;
+    const chat = getContext()?.chat;
+    if (pendingPreflightAttempt?.chat === chat
+        && pendingPreflightAttempt.report) {
+        markPreflightLifecycle(
+            'generation_after_commands_barrier_complete',
+            `roundKey=${pendingPreflightAttempt.roundKey}`,
+        );
+        return;
+    }
+    const userText = String($('#send_textarea').val() ?? '');
+    const shouldRun = shouldRunPreflightAfterCommands({
+        type,
+        automaticTrigger: params?.automatic_trigger,
+        dryRun,
+        groupActive: preflightGroupState.groupActive,
+        userText,
+    });
+    markPreflightLifecycle(
+        'generation_after_commands',
+        [
+            `type=${String(type)}`,
+            `dryRun=${Boolean(dryRun)}`,
+            `automatic=${Boolean(params?.automatic_trigger)}`,
+            `groupActive=${preflightGroupState.groupActive}`,
+            `hasUserText=${Boolean(userText.trim())}`,
+            `eligible=${shouldRun}`,
+        ].join(','),
+    );
+    if (!shouldRun) return;
     if (!isExtensionEnabledForChat()) {
         deactivateCurrentChatRuntime();
         return;
     }
-    const armed = preflightEventGate.arm({
-        type,
-        automaticTrigger: params?.automatic_trigger,
-        dryRun,
-        userText: $('#send_textarea').val(),
-    });
-    if (armed) clearPreflightInjection();
+    if (!Array.isArray(chat)) return;
+    const pendingMessage = createPendingPreflightMessage(chat, userText);
+    await runPreflightSafely(chat, pendingMessage, 'GENERATION_AFTER_COMMANDS');
+}
+
+function bindPendingPreflightAttempt(chat, message) {
+    const pending = pendingPreflightAttempt;
+    if (!pending || pending.chat !== chat) return false;
+    const report = pending.report || getCachedPluginLlmLogStage(
+        pending.roundKey,
+        PLUGIN_LLM_LOG_STAGES.PREFLIGHT,
+    );
+    const roundKey = getPluginLlmRoundKey(message);
+    if (!report || !roundKey) return false;
+    cachePluginLlmLogStage(
+        roundKey,
+        PLUGIN_LLM_LOG_STAGES.PREFLIGHT,
+        report,
+    );
+    pending.boundRoundKey = roundKey;
+    return true;
+}
+
+function getPendingPreflightReport(chat, roundKey) {
+    const pending = pendingPreflightAttempt;
+    if (!pending || pending.chat !== chat) return '';
+    if (pending.boundRoundKey && pending.boundRoundKey !== roundKey) return '';
+    return pending.report || getCachedPluginLlmLogStage(
+        pending.roundKey,
+        PLUGIN_LLM_LOG_STAGES.PREFLIGHT,
+    );
 }
 
 async function onPreflightMessageSent(messageId) {
+    markPreflightLifecycle('message_sent', `messageId=${String(messageId)}`);
     if (!isExtensionEnabledForChat()) {
         deactivateCurrentChatRuntime();
         return;
@@ -725,8 +914,10 @@ async function onPreflightMessageSent(messageId) {
     const ctx = getContext();
     const chat = ctx?.chat;
     const message = Array.isArray(chat) ? chat[Number(messageId)] : null;
-    if (!preflightEventGate.consume(message?.is_user && !message?.is_system)) return;
-    await runPreflightForUserMessage(chat, message);
+    if (!shouldRunPreflightForSentMessage(message)) return;
+    if (bindPendingPreflightAttempt(chat, message)) return;
+    trackPendingPreflightAttempt(chat, message);
+    await runPreflightSafely(chat, message, 'MESSAGE_SENT');
 }
 
 function onPreflightGenerationEnded() {
@@ -734,10 +925,11 @@ function onPreflightGenerationEnded() {
         deactivateCurrentChatRuntime();
         return;
     }
-    if (!preflightEventGate.groupActive) cancelPreflightWork();
+    if (!preflightGroupState.groupActive) cancelPreflightWork();
 }
 
 function onPreflightGenerationStopped() {
+    pendingPreflightAttempt = null;
     if (isExtensionEnabledForChat()) {
         cancelAllPluginWork();
     } else {
@@ -747,17 +939,18 @@ function onPreflightGenerationStopped() {
 
 function onPreflightGroupStarted({ type } = {}) {
     if (!isExtensionEnabledForChat()) {
-        preflightEventGate.finishGroup();
+        preflightGroupState.finishGroup();
         deactivateCurrentChatRuntime();
         return;
     }
-    preflightEventGate.startGroup();
+    preflightGroupState.startGroup();
     cancelPostflightWork({ detach: true });
     cancelPreflightWork({ clearInjection: false });
 }
 
 function onPreflightGroupFinished() {
-    preflightEventGate.finishGroup();
+    preflightGroupState.finishGroup();
+    pendingPreflightAttempt = null;
     cancelPreflightWork();
     if (!isExtensionEnabledForChat()) {
         clearLocationInjection();
@@ -767,7 +960,8 @@ function onPreflightGroupFinished() {
 }
 
 function onPreflightChatChanged() {
-    preflightEventGate.finishGroup();
+    preflightGroupState.finishGroup();
+    pendingPreflightAttempt = null;
     deactivateCurrentChatRuntime();
 }
 
@@ -800,8 +994,8 @@ function getCurrentLocationSnapshot() {
 
 function getPreviousAiMessage(chat, userMessage) {
     const index = chat.indexOf(userMessage);
-    if (index < 0) return null;
-    return chat.slice(0, index).reverse().find(item => item && !item.is_user && !item.is_system) || null;
+    const history = index < 0 ? chat : chat.slice(0, index);
+    return [...history].reverse().find(item => item && !item.is_user && !item.is_system) || null;
 }
 
 function getPluginLlmMessageText(chat, message) {
@@ -877,20 +1071,63 @@ function runAmapCallbackWithSignal(start, signal, fallback = null) {
     });
 }
 
+async function runPreflightSafely(chat, message, source) {
+    const roundKey = getPluginLlmRoundKey(message);
+    markPreflightLifecycle('preflight_entered', `source=${source},roundKey=${roundKey}`);
+    try {
+        await runPreflightForUserMessage(chat, message);
+    } catch (error) {
+        markPreflightLifecycle(
+            'preflight_failed',
+            `source=${source},error=${error?.message || String(error)}`,
+        );
+        cachePluginLlmLogStage(
+            roundKey,
+            PLUGIN_LLM_LOG_STAGES.PREFLIGHT,
+            createFailedPreflightDebugReport(source, error),
+        );
+        clearPreflightInjection();
+        console.error(`[realmap] ${source} preflight failed`, error);
+    }
+}
+
 async function runPreflightForUserMessage(chat, message) {
     const settings = ensureSettings();
-    if (!isCurrentChatRun(chat)
-        || !settings.key
-        || !settings.llmApiKey
-        || !settings.llmModel) {
+    if (!isCurrentChatRun(chat)) {
+        clearPreflightInjection();
+        return;
+    }
+    const roundKey = getPluginLlmRoundKey(message);
+    const unavailableReasons = [
+        !settings.key ? '未配置高德JS API Key。' : '',
+        !settings.llmApiKey ? '未配置插件LLM API Key。' : '',
+        !settings.llmModel ? '未选择插件LLM模型。' : '',
+        !getLlmBaseUrl(settings) ? '插件LLM Base URL无效。' : '',
+    ].filter(Boolean);
+    if (unavailableReasons.length) {
+        markPreflightLifecycle(
+            'preflight_unavailable',
+            unavailableReasons.join(' '),
+        );
+        cachePluginLlmLogStage(
+            roundKey,
+            PLUGIN_LLM_LOG_STAGES.PREFLIGHT,
+            createUnavailablePreflightDebugReport(unavailableReasons),
+        );
         clearPreflightInjection();
         return;
     }
 
-    cancelPreflightWork({ clearInjection: true, disarm: false });
+    cancelPreflightWork({ clearInjection: true });
     const runId = preflightRunId;
     const runController = new AbortController();
     preflightAbortController = runController;
+    markPreflightLifecycle('plugin_llm_request_started', `roundKey=${roundKey}`);
+    cachePluginLlmLogStage(
+        roundKey,
+        PLUGIN_LLM_LOG_STAGES.PREFLIGHT,
+        createStartedPreflightDebugReport(),
+    );
     const deadline = Date.now() + PREFLIGHT_TOTAL_TIMEOUT_MS;
     const previousAi = getPreviousAiMessage(chat, message);
     const current = getLocationSnapshotFromState(previousAi?.extra?.realmap)
@@ -909,8 +1146,6 @@ async function runPreflightForUserMessage(chat, message) {
             }),
         },
     ];
-    const roundKey = getPluginLlmRoundKey(message);
-
     const rawIntent = await callPluginLlm(settings, messages, {
         maxTokens: PLUGIN_LLM_MAX_TOKENS,
         showDebug: false,
@@ -919,6 +1154,14 @@ async function runPreflightForUserMessage(chat, message) {
         abortController: runController,
         debugLabel: '正文前信息补充LLM',
         onDebugReport: (report, debugState = {}) => {
+            markPreflightLifecycle(
+                'plugin_llm_report_received',
+                [
+                    `timedOut=${Boolean(debugState.timedOut)}`,
+                    `aborted=${Boolean(debugState.aborted)}`,
+                    `httpStatus=${Number(debugState.httpStatus) || 0}`,
+                ].join(','),
+            );
             if (!isCurrentChatRun(chat, {
                 runId,
                 currentRunId: preflightRunId,
@@ -1205,12 +1448,19 @@ async function onChatChanged() {
 async function onAiMessage(_messageId) {
     if (!isChatOpen() || !isExtensionEnabledForChat()) return;
     const chat = getContext()?.chat;
-    const loc = await inferLocationFromVisible();
-    if (loc === PLUGIN_CALL_CANCELLED) return;
-    if (!isCurrentChatRun(chat)) return;
-    await refreshMap();
-    if (!isCurrentChatRun(chat)) return;
-    updateExtensionPrompt();
+    try {
+        const loc = await inferLocationFromVisible();
+        if (loc === PLUGIN_CALL_CANCELLED) return;
+        if (!isCurrentChatRun(chat)) return;
+        await refreshMap();
+        if (!isCurrentChatRun(chat)) return;
+        updateExtensionPrompt();
+    } finally {
+        if (!preflightGroupState.groupActive
+            && pendingPreflightAttempt?.chat === chat) {
+            pendingPreflightAttempt = null;
+        }
+    }
 }
 
 async function handleRejudge() {
@@ -1324,6 +1574,16 @@ async function inferLocationFromVisible() {
             roundKey,
             PLUGIN_LLM_LOG_STAGES.PREFLIGHT,
         );
+        if (!preflightDebugReport) {
+            preflightDebugReport = getPendingPreflightReport(chat, roundKey);
+            if (preflightDebugReport) {
+                cachePluginLlmLogStage(
+                    roundKey,
+                    PLUGIN_LLM_LOG_STAGES.PREFLIGHT,
+                    preflightDebugReport,
+                );
+            }
+        }
         if (!preflightDebugReport) {
             preflightDebugReport = createMissingPreflightDebugReport();
             cachePluginLlmLogStage(

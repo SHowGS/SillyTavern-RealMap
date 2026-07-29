@@ -1,5 +1,5 @@
 import { extension_settings, extensionTypes, renderExtensionTemplateAsync, getContext } from '../../../extensions.js';
-import { saveSettingsDebounced, eventSource, event_types, chat_metadata, setExtensionPrompt, extension_prompt_types, extension_prompt_roles, setExternalAbortController, deactivateSendButtons, activateSendButtons, getRequestHeaders } from '../../../../script.js';
+import { saveSettingsDebounced, eventSource, event_types, chat_metadata, setExtensionPrompt, extension_prompt_types, extension_prompt_roles, setExternalAbortController, deactivateSendButtons, activateSendButtons, stopGeneration, getRequestHeaders } from '../../../../script.js';
 import { t } from '../../../i18n.js';
 import { Popup, POPUP_RESULT, POPUP_TYPE } from '../../../popup.js';
 import { isAdmin } from '../../../user.js';
@@ -54,6 +54,7 @@ import {
     shouldRunPreflightForSentMessage,
 } from './preflight-route.js';
 import { formatVersionLabel, getUpdateButtonPresentation } from './version-state.js';
+import { GenerationCancellationScope } from './generation-cancel.js';
 
 const MODULE_NAME = 'realmap';
 const EXTENSION_MANIFEST_ID = 'third-party/SillyTavern-RealMap';
@@ -78,6 +79,10 @@ let pendingPreflightAttempt = null;
 let preflightAttemptSequence = 0;
 let postflightAbortController = null;
 let postflightRunId = 0;
+let postflightUiHoldScope = null;
+let generationCancellationScope = null;
+let generationCancellationPendingStart = false;
+let generationCancellationPendingTimer = null;
 let extensionUpdateInProgress = false;
 let latestPluginLlmLogInMemory = null;
 let preflightLifecycle = {
@@ -560,6 +565,8 @@ async function updateRealMapExtension() {
         } else {
             const commit = data.shortCommitHash ? `（${data.shortCommitHash}）` : '';
             toastr.success(t`现实地图已更新${commit}，请刷新页面以应用更新。`);
+            window.location.reload();
+            return;
         }
         await checkRealMapVersion();
     } catch (error) {
@@ -636,6 +643,11 @@ export async function init() {
     eventSource.on(event_types.MESSAGE_DELETED, debouncedOnChatChanged);
     eventSource.on(event_types.MESSAGE_EDITED, debouncedOnChatChanged);
     eventSource.makeLast(event_types.CHARACTER_MESSAGE_RENDERED, onAiMessage);
+    document.getElementById('send_but')?.addEventListener(
+        'click',
+        prepareGenerationCancellationFromSendClick,
+        true,
+    );
     markPreflightLifecycle('listeners_registered');
     onChatChanged();
     $('#realmap_enable_btn').on('click', () => void handleEnableFromSettings());
@@ -662,6 +674,61 @@ function clearLocationInjection() {
         false,
         extension_prompt_roles.SYSTEM,
     );
+}
+
+function prepareGenerationCancellationFromSendClick() {
+    if (!isExtensionEnabledForChat()) return;
+    generationCancellationScope?.requestStop('新一轮发送已开始');
+    const scope = new GenerationCancellationScope();
+    generationCancellationScope = scope;
+    generationCancellationPendingStart = true;
+    clearTimeout(generationCancellationPendingTimer);
+    generationCancellationPendingTimer = setTimeout(() => {
+        if (!generationCancellationPendingStart
+            || generationCancellationScope !== scope) return;
+        generationCancellationPendingStart = false;
+        scope.requestStop('发送流程未能开始');
+        generationCancellationScope = null;
+        activateSendButtons();
+    }, 30_000);
+    deactivateSendButtons();
+    setExternalAbortController(scope.controller);
+}
+
+function beginGenerationCancellation(params = {}) {
+    const existingScope = generationCancellationScope;
+    if (generationCancellationPendingStart && existingScope) {
+        generationCancellationPendingStart = false;
+        clearTimeout(generationCancellationPendingTimer);
+        generationCancellationPendingTimer = null;
+        existingScope.attachMainSignal(params?.signal);
+        deactivateSendButtons();
+        return existingScope;
+    }
+    const reuseGroupScope = preflightGroupState.groupActive && existingScope;
+    if (reuseGroupScope) {
+        existingScope.attachMainSignal(params?.signal);
+        deactivateSendButtons();
+        return existingScope;
+    }
+
+    existingScope?.requestStop('新一轮生成已开始');
+    const scope = new GenerationCancellationScope(params?.signal);
+    generationCancellationScope = scope;
+    deactivateSendButtons();
+    if (scope.shouldInstallAsExternalController()) {
+        setExternalAbortController(scope.controller);
+    }
+    return scope;
+}
+
+function requestGenerationStop(reason = '用户点击停止') {
+    generationCancellationScope?.requestStop(reason);
+}
+
+function createGenerationChildController() {
+    return generationCancellationScope?.createChildController()
+        || new AbortController();
 }
 
 function cancelPreflightWork({ clearInjection = true } = {}) {
@@ -691,6 +758,10 @@ function cancelAllPluginWork({ detachPostflight = false } = {}) {
 }
 
 function deactivateCurrentChatRuntime({ closeMap = true } = {}) {
+    generationCancellationPendingStart = false;
+    clearTimeout(generationCancellationPendingTimer);
+    generationCancellationPendingTimer = null;
+    requestGenerationStop('现实地图运行环境已停用');
     cancelAllPluginWork();
     clearLocationInjection();
     hideMinimap();
@@ -774,6 +845,7 @@ async function onPreflightGenerationStarted(type, params, dryRun) {
         deactivateCurrentChatRuntime();
         return;
     }
+    beginGenerationCancellation(params);
     const chat = getContext()?.chat;
     const unansweredUserMessage = getUnansweredUserMessage(chat);
     const canReuseCompletedBarrier = !params?.automatic_trigger
@@ -839,6 +911,11 @@ async function onPreflightGenerationStarted(type, params, dryRun) {
 
 async function onPreflightGenerationAfterCommands(type, params, dryRun) {
     if (dryRun) return;
+    generationCancellationScope?.markMainControllerReady();
+    if (generationCancellationScope?.stopRequested) {
+        stopGeneration();
+        return;
+    }
     const chat = getContext()?.chat;
     if (pendingPreflightAttempt?.chat === chat
         && pendingPreflightAttempt.report) {
@@ -926,10 +1003,23 @@ function onPreflightGenerationEnded() {
         return;
     }
     if (!preflightGroupState.groupActive) cancelPreflightWork();
+    const heldScope = postflightUiHoldScope;
+    if (heldScope
+        && generationCancellationScope === heldScope
+        && !heldScope.stopRequested) {
+        queueMicrotask(() => {
+            if (postflightUiHoldScope === heldScope
+                && generationCancellationScope === heldScope
+                && !heldScope.stopRequested) {
+                deactivateSendButtons();
+            }
+        });
+    }
 }
 
 function onPreflightGenerationStopped() {
     pendingPreflightAttempt = null;
+    requestGenerationStop();
     if (isExtensionEnabledForChat()) {
         cancelAllPluginWork();
     } else {
@@ -1097,6 +1187,10 @@ async function runPreflightForUserMessage(chat, message) {
         clearPreflightInjection();
         return;
     }
+    if (generationCancellationScope?.stopRequested) {
+        clearPreflightInjection();
+        return;
+    }
     const roundKey = getPluginLlmRoundKey(message);
     const unavailableReasons = [
         !settings.key ? '未配置高德JS API Key。' : '',
@@ -1120,7 +1214,8 @@ async function runPreflightForUserMessage(chat, message) {
 
     cancelPreflightWork({ clearInjection: true });
     const runId = preflightRunId;
-    const runController = new AbortController();
+    const runController = createGenerationChildController();
+    if (runController.signal.aborted) return;
     preflightAbortController = runController;
     markPreflightLifecycle('plugin_llm_request_started', `roundKey=${roundKey}`);
     cachePluginLlmLogStage(
@@ -1447,18 +1542,33 @@ async function onChatChanged() {
 
 async function onAiMessage(_messageId) {
     if (!isChatOpen() || !isExtensionEnabledForChat()) return;
+    if (generationCancellationScope?.stopRequested) return;
+    const generationScope = generationCancellationScope;
     const chat = getContext()?.chat;
+    postflightUiHoldScope = generationScope;
+    deactivateSendButtons();
     try {
-        const loc = await inferLocationFromVisible();
+        const loc = await inferLocationFromVisible({ generationScoped: true });
         if (loc === PLUGIN_CALL_CANCELLED) return;
+        if (generationCancellationScope !== generationScope
+            || generationScope?.stopRequested) return;
         if (!isCurrentChatRun(chat)) return;
         await refreshMap();
+        if (generationCancellationScope !== generationScope
+            || generationScope?.stopRequested) return;
         if (!isCurrentChatRun(chat)) return;
         updateExtensionPrompt();
     } finally {
+        if (postflightUiHoldScope === generationScope) {
+            postflightUiHoldScope = null;
+        }
         if (!preflightGroupState.groupActive
             && pendingPreflightAttempt?.chat === chat) {
             pendingPreflightAttempt = null;
+        }
+        if (!preflightGroupState.groupActive
+            && generationCancellationScope === generationScope) {
+            activateSendButtons();
         }
     }
 }
@@ -1538,10 +1648,14 @@ async function askEnable(text) {
     return r === POPUP_RESULT.AFFIRMATIVE;
 }
 
-async function inferLocationFromVisible() {
+async function inferLocationFromVisible({ generationScoped = false } = {}) {
     const ctx = getContext();
     const chat = ctx?.chat;
     if (!Array.isArray(chat) || !isCurrentChatRun(chat)) {
+        return PLUGIN_CALL_CANCELLED;
+    }
+    const generationScope = generationScoped ? generationCancellationScope : null;
+    if (generationScope?.stopRequested) {
         return PLUGIN_CALL_CANCELLED;
     }
 
@@ -1557,9 +1671,11 @@ async function inferLocationFromVisible() {
 
     cancelPostflightWork({ detach: true });
     const runId = postflightRunId;
-    const controller = new AbortController();
+    const controller = generationScope?.createChildController()
+        || new AbortController();
+    if (controller.signal.aborted) return PLUGIN_CALL_CANCELLED;
     postflightAbortController = controller;
-    deactivateSendButtons();
+    if (!generationScoped) deactivateSendButtons();
 
     try {
         const roundContext = getRoundContext(chat);
@@ -1639,7 +1755,7 @@ async function inferLocationFromVisible() {
     } finally {
         if (postflightAbortController === controller) {
             postflightAbortController = null;
-            activateSendButtons();
+            if (!generationScoped) activateSendButtons();
         }
     }
 }

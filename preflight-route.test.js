@@ -57,6 +57,7 @@ function createFakeAMap({
     fromCity = '成都市',
     toCity = '成都市',
     hangingModes = [],
+    hangingGeocoder = false,
 } = {}) {
     const calls = [];
     const hanging = new Set(hangingModes);
@@ -75,6 +76,7 @@ function createFakeAMap({
 
     class Geocoder {
         getAddress(point, callback) {
+            if (hangingGeocoder) return;
             const city = Number(point[0]) < 105 ? fromCity : toCity;
             queueMicrotask(() => callback('complete', {
                 regeocode: { addressComponent: { city, province: city } },
@@ -305,6 +307,26 @@ test('releases hanging route callbacks immediately when aborted', async () => {
     setTimeout(() => controller.abort(), 10);
     assert.deepEqual(await pending, []);
     assert.ok(Date.now() - started < 200);
+});
+
+test('does not start a queued route request after cancellation', async () => {
+    const { AMap, calls } = createFakeAMap({ hangingGeocoder: true });
+    const controller = new AbortController();
+    const pending = queryRouteOptions(AMap, {
+        from: { lng: 104.08, lat: 30.67 },
+        to: { lng: 104.20, lat: 30.67 },
+        modes: ['transfer'],
+        deadline: Date.now() + 1000,
+        signal: controller.signal,
+    });
+
+    controller.abort();
+
+    assert.deepEqual(await pending, []);
+    assert.equal(
+        calls.some(call => call.mode === 'transfer'),
+        false,
+    );
 });
 
 test('formats bounded main-model context with route details', () => {
